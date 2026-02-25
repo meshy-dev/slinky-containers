@@ -4,7 +4,7 @@
 ################################################################################
 
 variable "REGISTRY" {
-  default = "ghcr.io/slinkyproject"
+  default = "ghcr.io/meshy-dev/slinky-containers"
 }
 
 variable "SUFFIX" {}
