@@ -7,7 +7,7 @@
 ARG SLURM_VERSION=25.11-latest
 ARG SLURM_VERSION_MICRO=1
 ARG SLURM_DIR=slurm
-ARG PARENT_IMAGE=ubuntu:24.04
+ARG PARENT_IMAGE=nvidia/cuda:12.8.0-devel-ubuntu24.04
 
 ################################################################################
 FROM alpine:latest AS slurm-src
@@ -109,6 +109,9 @@ apt-get -qq -y install --no-install-recommends \
 # Debug
 apt-get -qq -y install --no-install-recommends \
   procps iputils-ping ncurses-bin
+# Basic user-facing QoL
+apt-get -qq -y install --no-install-recommends \
+  vim less sudo wget unzip git
 EOR
 
 ################################################################################
@@ -120,11 +123,58 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
+# Add MLNX OFED Repository
+set -xeuo pipefail
+apt-get -qq update
+apt-get -qq -y install --no-install-recommends \
+  ca-certificates curl gnupg
+curl -fsSL https://linux.mellanox.com/public/repo/mlnx_ofed/latest/ubuntu24.04/mellanox_mlnx_ofed.list | tee /etc/apt/sources.list.d/mellanox-mlnx-ofed.list
+wget -qO - https://www.mellanox.com/downloads/ofed/RPM-GPG-KEY-Mellanox | apt-key add -
+chmod 644 /etc/apt/sources.list.d/mellanox-mlnx-ofed.list
+apt-get -qq update
+EOR
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 # Install Extra Packages
 set -xeuo pipefail
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends \
-  openmpi-bin
+  openmpi
+# Install Infiniband Guest Components
+apt-get -qq -y install --no-install-recommends \
+  rdma-core \
+  ibverbs-providers \
+  infiniband-diags \
+  mlnx-ethtool \
+  perftest
+EOR
+
+################################################################################
+FROM ${PARENT_IMAGE} AS gdrcopy-build
+
+SHELL ["bash", "-c"]
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+USER root
+WORKDIR /workspace/
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
+# Install gdrcopy Build Dependencies
+set -xeuo pipefail
+apt-get -qq update
+apt-get -qq -y install --no-install-recommends \
+  build-essential git check pkg-config debhelper dkms python3
+EOR
+
+RUN <<EOR
+# Clone and Build gdrcopy
+set -xeuo pipefail
+git clone https://github.com/NVIDIA/gdrcopy.git /workspace/gdrcopy
+cd /workspace/gdrcopy
+make prefix=/usr/local CUDA=/usr/local/cuda config lib lib_install
 EOR
 
 ################################################################################
@@ -208,6 +258,10 @@ mkdir -p /etc/authselect
 authselect select sssd with-mkhomedir --force
 rm -f /etc/ssh/ssh_host_*
 EOR
+
+COPY --from=gdrcopy-build /usr/local/lib/libgdrapi* /usr/local/lib/
+COPY --from=gdrcopy-build /usr/local/include/gdr* /usr/local/include/
+RUN ldconfig
 
 COPY files/etc/supervisor/supervisord.conf /etc/supervisor/
 COPY \
@@ -366,6 +420,10 @@ mkdir -p /etc/authselect
 authselect select sssd with-mkhomedir --force
 rm -f /etc/ssh/ssh_host_*
 EOR
+
+COPY --from=gdrcopy-build /usr/local/lib/libgdrapi* /usr/local/lib/
+COPY --from=gdrcopy-build /usr/local/include/gdr* /usr/local/include/
+RUN ldconfig
 
 COPY files/etc/supervisor/supervisord.conf /etc/supervisor/
 COPY \
