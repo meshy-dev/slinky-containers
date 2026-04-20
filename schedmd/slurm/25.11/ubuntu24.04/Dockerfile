@@ -502,7 +502,7 @@ COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/slurmd-entrypoint.sh /usr/local/bin/entrypoint.sh
 
 ENV PATH=/opt/amazon/${OMPI_DEFAULT}/bin:/opt/amazon/efa/bin:/usr/local/cuda/bin:${PATH}
-ENV LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/amazon/${OMPI_DEFAULT}/lib:/opt/amazon/ofi-nccl/lib:/opt/amazon/ofi-nccl/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:/usr/local/lib
+ENV LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/amazon/${OMPI_DEFAULT}/lib:/opt/amazon/pmix/lib:/opt/amazon/ofi-nccl/lib:/opt/amazon/ofi-nccl/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:/usr/local/lib
 ENV OPAL_PREFIX=/opt/amazon/${OMPI_DEFAULT}
 ENV FI_EFA_USE_DEVICE_RDMA=1
 ENV FI_EFA_FORK_SAFE=1
