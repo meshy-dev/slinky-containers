@@ -10,6 +10,25 @@ variable "REGISTRY" {
 variable "SUFFIX" {}
 
 ################################################################################
+# slurmd-cuda-efa variables (A4). See plan packet A4 / outline §3 ARG table.
+# These default values match the Dockerfile ARG defaults in
+# schedmd/slurm/25.11/ubuntu24.04/Dockerfile; overriding either here or via
+# --set slurmd-cuda-efa.args.* must keep the two in sync.
+
+variable "CUDA_BASE_TAG"          { default = "13.2.1-devel-ubuntu24.04" }
+variable "SLURM_VERSION_CUDA_EFA" { default = "25.11.0" }
+variable "SLURM_DEB_PATCH_REV"    { default = "meshy1" }
+variable "EFA_INSTALLER_VERSION"  { default = "1.48.0" }
+variable "EFA_INSTALLER_FLAGS"    { default = "-y -g -d --skip-kmod --skip-limit-conf --no-verify" }
+variable "OMPI_DEFAULT"           { default = "openmpi5" }
+variable "NCCL_CUDA_SUFFIX"       { default = "cuda13.2" }
+variable "NVCC_GENCODE"           { default = "-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100" }
+variable "DEBIAN_FRONTEND"        { default = "noninteractive" }
+
+# GHA injects GITHUB_SHA; local builds get an empty string (tag dropped by compact()).
+variable "SHA" { default = "" }
+
+################################################################################
 
 slurm_version = "master"
 slurm_version_micro = "1"
@@ -271,6 +290,38 @@ target "login_pyxis" {
     format_tag(REGISTRY, "login", slurm_version(slurm_version), linux_flavor, SUFFIX) = "target:login"
     format_tag(REGISTRY, "login", slurm_version, linux_flavor, SUFFIX) = "target:login"
   }
+}
+
+################################################################################
+# slurmd-cuda-efa (A4): forles consolidated slurmd image, CUDA 13.2 + EFA +
+# OMPI5 + from-source Slurm .debs with NVML/PMIx. Runs independently of the
+# upstream `slurmd` target above (which may point at a different parent image
+# depending on BAKE_IMPORTS); default group is NOT extended to keep upstream
+# CI semantics unchanged. Invoke explicitly: `docker buildx bake slurmd-cuda-efa`.
+
+target "slurmd-cuda-efa" {
+  inherits = ["_slurmd"]
+  context = "25.11/ubuntu24.04"
+  dockerfile = "Dockerfile"
+  target = "slurmd"
+  platforms = ["linux/amd64"]
+  args = {
+    CUDA_BASE_TAG         = CUDA_BASE_TAG
+    SLURM_VERSION         = SLURM_VERSION_CUDA_EFA
+    SLURM_DEB_PATCH_REV   = SLURM_DEB_PATCH_REV
+    EFA_INSTALLER_VERSION = EFA_INSTALLER_VERSION
+    EFA_INSTALLER_FLAGS   = EFA_INSTALLER_FLAGS
+    OMPI_DEFAULT          = OMPI_DEFAULT
+    NCCL_CUDA_SUFFIX      = NCCL_CUDA_SUFFIX
+    NVCC_GENCODE          = NVCC_GENCODE
+    DEBIAN_FRONTEND       = DEBIAN_FRONTEND
+    PARENT_IMAGE          = "nvidia/cuda:${CUDA_BASE_TAG}"
+  }
+  tags = compact([
+    "${REGISTRY}/slurmd:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-efa",
+    "${REGISTRY}/slurmd:25.11-cuda13.2-ubuntu24.04-efa",
+    SHA != "" ? "${REGISTRY}/slurmd:${SHA}" : "",
+  ])
 }
 
 ################################################################################
