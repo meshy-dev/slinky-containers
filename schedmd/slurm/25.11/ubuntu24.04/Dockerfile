@@ -74,10 +74,12 @@ useradd --system --no-log-init --uid=${SLURM_USER_UID} --gid=${SLURM_USER_GID} -
 EOR
 
 RUN <<EOR
-# Remove pre-created users from parent CUDA image
+# Remove pre-created users from parent CUDA image.
+# Base nvidia/cuda:13.2.1-devel-ubuntu24.04 ships a single 'ubuntu' user under
+# /home; userdel --remove succeeds cleanly (mail spool absence is informational).
 set -xeuo pipefail
 for user in $(ls /home/); do
-  userdel --remove $user || true
+  userdel --remove "$user"
 done
 EOR
 
@@ -120,14 +122,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 set -xeuo pipefail
 apt-get -qq update
 # Candidate selection: newest libnccl2/libnccl-dev whose version contains the
-# CUDA suffix token (e.g. "+cuda13.2"). apt-cache policy emits candidate lines;
-# if no candidate contains the suffix, this command fails fast (caught by B4).
+# CUDA suffix token (e.g. "+cuda13.2"). apt-cache madison emits candidate lines;
+# `${var:?msg}` fails the RUN if awk returns empty (no matching candidate).
 NCCL_PKG_VER="$(apt-cache madison libnccl2 | awk -v s="${NCCL_CUDA_SUFFIX}" '$3 ~ s { print $3; exit }')"
-if [ -z "${NCCL_PKG_VER}" ]; then
-  echo "FATAL: no libnccl2 candidate matches suffix ${NCCL_CUDA_SUFFIX}" >&2
-  echo "Run B4 pre-flight probe before B1; see plan packet B4." >&2
-  exit 1
-fi
+: "${NCCL_PKG_VER:?FATAL: no libnccl2 candidate matches suffix ${NCCL_CUDA_SUFFIX} (run B4 pre-flight probe)}"
 apt-get -qq -y install --no-install-recommends \
   "libnccl2=${NCCL_PKG_VER}" \
   "libnccl-dev=${NCCL_PKG_VER}"
@@ -137,17 +135,25 @@ EOR
 # base-efa — AWS EFA installer: libfabric-aws + OMPI4 + OMPI5 + aws-ofi-nccl.
 #
 # Plan §6 ordering (mirrors research doc §4 pitfalls + §1 canonical install):
-#   1. purge conflicting ibverbs / libfabric / openmpi from base image
-#   2. apt install EFA build deps (ca-certificates curl tar hwloc etc.)
-#   3. fetch aws-efa-installer tarball
+#   1. apt install EFA build deps (ca-certificates curl tar hwloc etc.)
+#   2. fetch aws-efa-installer tarball
+#   3. pre-install EFA-bundled rdma-core v61 (satisfies libfabric1-aws deps)
 #   4. run ./efa_installer.sh ${EFA_INSTALLER_FLAGS}  (NO --skip-mpi)
-#   5. verify bundled plugin .so is present
-#   6. verify mpirun is OMPI 5.x
-#   7. cleanup tarball
+#   5. install EFA-bundled OMPI5 / PMIx / prrte debs (NGC mode skips MPI)
+#   6. verify bundled plugin .so is present
+#   7. verify mpirun is OMPI 5.x
+#   8. cleanup tarball
 #
 # EFA_INSTALLER_FLAGS default = "-y -g -d --skip-kmod --skip-limit-conf --no-verify"
 # (research doc §1 canonical form). Do NOT append --skip-mpi here or --mpi=openmpi4
 # — we NEED the OMPI5 tree for PMIx v4 used by --with-pmix= in slurm-build.
+#
+# Note: no pre-install apt purge of ibverbs / libfabric / openmpi is performed.
+# The pinned CUDA 13.2.1 devel base does not ship any of those packages, and
+# base / base-cuda do not install them. The only rdma-core-adjacent package
+# later added is via the EFA installer's bundled v61 debs below; nothing in
+# earlier stages conflicts with them, so the old `apt-get remove` stanza
+# (formerly step 1) is dead code and has been removed.
 FROM base-cuda AS base-efa
 
 SHELL ["bash", "-c"]
@@ -157,20 +163,7 @@ ARG EFA_INSTALLER_VERSION
 ARG EFA_INSTALLER_FLAGS
 ARG OMPI_DEFAULT
 
-# Step 1: purge conflicting system packages that would leak into EFA plugin link.
-# Research doc §5 "EFA installer libfabric override" + canonical AWSome-distrib
-# `apt-get remove --allow-change-held-packages` stanza.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-  --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
-set -xeuo pipefail
-apt-get -qq update
-apt-get -qq -y remove --allow-change-held-packages \
-  libibverbs-dev libmlx5-1 ibverbs-providers libfabric1 libfabric-dev \
-  openmpi-bin openmpi-common libopenmpi-dev libopenmpi3 || true
-apt-get -qq -y autoremove
-EOR
-
-# Step 2-4: fetch and run EFA installer (container-safe flags, with OMPI5).
+# Step 1-4: fetch and run EFA installer (container-safe flags, with OMPI5).
 #
 # rdma-core handling in a CUDA devel container:
 #  - nvidia/cuda:*-devel-ubuntu24.04 has /opt/nvidia/nvidia_entrypoint.sh,
@@ -238,29 +231,22 @@ cd /tmp
 rm -rf aws-efa-installer "aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"
 EOR
 
-# Step 5-6: verify bundled ofi-nccl plugin + OMPI5 mpirun.
-# Plugin path in NGC-build-image mode: EFA installer installs the
-# libnccl-ofi-ngc-v3 deb which drops the plugin at
-# /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so (flat layout, no
-# x86_64-linux-gnu subdir). On non-NGC installs EFA instead installs
-# libnccl-ofi which uses the x86_64-linux-gnu subdir layout. Accept
-# either by listing both candidate paths, but require at least one.
+# Step 6-7: verify bundled ofi-nccl plugin + OMPI5 mpirun (fail-fast hard gates).
+# The pinned CUDA 13.2.1 devel base triggers the EFA installer's NGC-build-image
+# detection path, which installs the libnccl-ofi-ngc-v3 deb. That deb drops the
+# plugin at /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so (flat layout, no
+# x86_64-linux-gnu subdir). Path is deterministic under this base; check it
+# directly instead of branching over alternate layouts.
 RUN <<EOR
 set -xeuo pipefail
-# Plugin path (bundled by EFA installer >= 1.35 per research doc §2):
-if ls /opt/amazon/ofi-nccl/lib/libnccl-net-ofi*.so >/dev/null 2>&1; then
-  ls -l /opt/amazon/ofi-nccl/lib/libnccl-net-ofi*.so
-elif ls /opt/amazon/ofi-nccl/lib/*/libnccl-net-ofi*.so >/dev/null 2>&1; then
-  ls -l /opt/amazon/ofi-nccl/lib/*/libnccl-net-ofi*.so
-else
-  echo "Error: no libnccl-net-ofi*.so found under /opt/amazon/ofi-nccl/lib" >&2
-  find /opt/amazon/ofi-nccl -name 'libnccl-*' >&2 || true
-  exit 1
-fi
+test -f /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so \
+  || { echo "FATAL: /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so missing (EFA NGC-mode plugin install failed)" >&2; exit 1; }
+ls -l /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so
 # OMPI5 mpirun sanity — must report "Open MPI" major 5.
 # AWS-bundled mpirun prints `mpirun (Open MPI) 5.0.9amzn1` so there is
 # a `)` between "MPI" and "5"; match with explicit close paren.
-/opt/amazon/${OMPI_DEFAULT}/bin/mpirun --version | grep -E "\(Open MPI\) 5\." >/dev/null
+/opt/amazon/${OMPI_DEFAULT}/bin/mpirun --version | grep -E "\(Open MPI\) 5\." >/dev/null \
+  || { echo "FATAL: /opt/amazon/${OMPI_DEFAULT}/bin/mpirun did not report Open MPI 5.x" >&2; exit 1; }
 EOR
 
 ################################################################################
