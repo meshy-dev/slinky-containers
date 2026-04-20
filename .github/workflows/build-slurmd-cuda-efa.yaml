@@ -2,8 +2,8 @@
 # Builds and pushes ghcr.io/meshy-dev/slinky-containers/slurmd:*cuda13.2*efa
 # via the `slurmd-cuda-efa` bake target (schedmd/slurm/docker-bake.hcl).
 #
-# Plan A5 / outline §10: the workflow is fork-local and independent of the
-# legacy taichi-dev/deployments build-slurmd-nccl.yaml workflow. Not a reuse.
+# This workflow is fork-local and independent of the legacy
+# taichi-dev/deployments build-slurmd-nccl.yaml workflow (not a reuse).
 name: build-slurmd-cuda-efa
 
 on:

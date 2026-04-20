@@ -10,7 +10,7 @@ variable "REGISTRY" {
 variable "SUFFIX" {}
 
 ################################################################################
-# slurmd-cuda-efa variables (A4). See plan packet A4 / outline §3 ARG table.
+# slurmd-cuda-efa build variables.
 # These default values match the Dockerfile ARG defaults in
 # schedmd/slurm/25.11/ubuntu24.04/Dockerfile; overriding either here or via
 # --set slurmd-cuda-efa.args.* must keep the two in sync.
@@ -293,8 +293,8 @@ target "login_pyxis" {
 }
 
 ################################################################################
-# slurmd-cuda-efa (A4): forles consolidated slurmd image, CUDA 13.2 + EFA +
-# OMPI5 + from-source Slurm .debs with NVML/PMIx. Runs independently of the
+# slurmd-cuda-efa: consolidated slurmd image, CUDA 13.2 + EFA + OMPI5 +
+# from-source Slurm .debs with NVML/PMIx. Runs independently of the
 # upstream `slurmd` target above (which may point at a different parent image
 # depending on BAKE_IMPORTS); default group is NOT extended to keep upstream
 # CI semantics unchanged. Invoke explicitly: `docker buildx bake slurmd-cuda-efa`.

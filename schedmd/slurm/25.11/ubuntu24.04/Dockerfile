@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ################################################################################
-# Build args — contract per plan docs/plans/2026-04-19T233208Z-meshy-slinky-slurmd-efa-cuda13.md §3
+# Build args
 #
 # CUDA_BASE_TAG          NVIDIA CUDA devel image tag (consumed via PARENT_IMAGE)
 # SLURM_VERSION          Upstream SchedMD slurm source version (e.g. 25.11.5)
@@ -101,14 +101,15 @@ EOR
 ################################################################################
 # base-cuda — NCCL apt pinned to ${NCCL_CUDA_SUFFIX}.
 #
-# Rationale: install NCCL BEFORE base-efa so EFA installer can see an existing
-# NCCL and link the ofi-nccl plugin consistently. Plan §2 / outline §2 DAG:
-# base → base-cuda → base-efa. Outline §14 Q2 notes EFA installer may purge
-# libnccl2; if B1 exposes that failure mode, swap DAG per outline guidance.
+# Rationale: install NCCL BEFORE base-efa so the EFA installer can see an
+# existing NCCL and link the ofi-nccl plugin consistently. Image DAG:
+# base → base-cuda → base-efa. If a future EFA installer release is observed
+# to purge libnccl2, swap the DAG order (install EFA first, then NCCL).
 #
-# Package suffix pin (e.g. libnccl2=*+cuda13.2) per outline §3 and research
-# doc §5 (NCCL↔CUDA skew). Pre-flight apt probe is B4 (outline §14 Q1);
-# source-build fallback is B5 (conditional).
+# Package suffix pin (e.g. libnccl2=*+cuda13.2) guards against NCCL↔CUDA ABI
+# skew: the CUDA network repo ships multiple libnccl2 builds per NCCL
+# release, one per CUDA major.minor, and grabbing the wrong one yields
+# symbol mismatches against the CUDA runtime in the parent image.
 FROM base AS base-cuda
 
 SHELL ["bash", "-c"]
@@ -125,7 +126,7 @@ apt-get -qq update
 # CUDA suffix token (e.g. "+cuda13.2"). apt-cache madison emits candidate lines;
 # `${var:?msg}` fails the RUN if awk returns empty (no matching candidate).
 NCCL_PKG_VER="$(apt-cache madison libnccl2 | awk -v s="${NCCL_CUDA_SUFFIX}" '$3 ~ s { print $3; exit }')"
-: "${NCCL_PKG_VER:?FATAL: no libnccl2 candidate matches suffix ${NCCL_CUDA_SUFFIX} (run B4 pre-flight probe)}"
+: "${NCCL_PKG_VER:?FATAL: no libnccl2 candidate matches suffix ${NCCL_CUDA_SUFFIX} in apt-cache madison}"
 apt-get -qq -y install --no-install-recommends \
   "libnccl2=${NCCL_PKG_VER}" \
   "libnccl-dev=${NCCL_PKG_VER}"
@@ -134,19 +135,20 @@ EOR
 ################################################################################
 # base-efa — AWS EFA installer: libfabric-aws + OMPI4 + OMPI5 + aws-ofi-nccl.
 #
-# Plan §6 ordering (mirrors research doc §4 pitfalls + §1 canonical install):
+# Install ordering (mirrors the canonical AWS EFA installer flow):
 #   1. apt install EFA build deps (ca-certificates curl tar hwloc etc.)
 #   2. fetch aws-efa-installer tarball
 #   3. pre-install EFA-bundled rdma-core v61 (satisfies libfabric1-aws deps)
 #   4. run ./efa_installer.sh ${EFA_INSTALLER_FLAGS}  (NO --skip-mpi)
-#   5. install EFA-bundled OMPI5 / PMIx / prrte debs (NGC mode skips MPI)
-#   6. verify bundled plugin .so is present
+#   5. install EFA-bundled OMPI5 / PMIx / prrte debs (NGC-build-mode skips MPI)
+#   6. verify bundled ofi-nccl plugin .so is present
 #   7. verify mpirun is OMPI 5.x
 #   8. cleanup tarball
 #
-# EFA_INSTALLER_FLAGS default = "-y -g -d --skip-kmod --skip-limit-conf --no-verify"
-# (research doc §1 canonical form). Do NOT append --skip-mpi here or --mpi=openmpi4
-# — we NEED the OMPI5 tree for PMIx v4 used by --with-pmix= in slurm-build.
+# EFA_INSTALLER_FLAGS default = "-y -g -d --skip-kmod --skip-limit-conf --no-verify".
+# Do NOT append --skip-mpi here or --mpi=openmpi4 — the OMPI5 tree (and its
+# bundled PMIx v4) is required by slurm-build's --with-pmix=/opt/amazon/pmix
+# configure flag so slurmd links the PMIx ABI user jobs consume via srun.
 #
 # Note: no pre-install apt purge of ibverbs / libfabric / openmpi is performed.
 # The pinned CUDA 13.2.1 devel base does not ship any of those packages, and
@@ -163,7 +165,7 @@ ARG EFA_INSTALLER_VERSION
 ARG EFA_INSTALLER_FLAGS
 ARG OMPI_DEFAULT
 
-# Step 1-4: fetch and run EFA installer (container-safe flags, with OMPI5).
+# Fetch and run EFA installer (container-safe flags, with OMPI5).
 #
 # rdma-core handling in a CUDA devel container:
 #  - nvidia/cuda:*-devel-ubuntu24.04 has /opt/nvidia/nvidia_entrypoint.sh,
@@ -214,7 +216,7 @@ cd /tmp/aws-efa-installer
 # ofi-nccl plugin; it deliberately skips MPI packages (expects the
 # NGC parent image to provide them). We need OMPI5 + its PMIx tree
 # for two reasons:
-#   1. slurm-build stage configures with --with-pmix=/opt/amazon/openmpi5
+#   1. the slurm-build target configures with --with-pmix=/opt/amazon/pmix
 #      (debian-rules-nvml-pmix.patch) so slurmd links the same PMIx ABI
 #      that user jobs will use via srun --mpi=pmix.
 #   2. user jobs invoke /opt/amazon/openmpi5/bin/mpirun at runtime.
@@ -231,7 +233,7 @@ cd /tmp
 rm -rf aws-efa-installer "aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"
 EOR
 
-# Step 6-7: verify bundled ofi-nccl plugin + OMPI5 mpirun (fail-fast hard gates).
+# Verify bundled ofi-nccl plugin + OMPI5 mpirun (fail-fast hard gates).
 # The pinned CUDA 13.2.1 devel base triggers the EFA installer's NGC-build-image
 # detection path, which installs the libnccl-ofi-ngc-v3 deb. That deb drops the
 # plugin at /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so (flat layout, no
@@ -253,12 +255,12 @@ EOR
 # slurm-build — build SchedMD .debs from source against base-efa environment.
 #
 # Parent MUST be base-efa (NOT slurm-src): debian/rules configure flags need
-# libpmix from /opt/amazon/openmpi5 and libnvidia-ml-dev from CUDA parent.
-# Outline §2 cite: "FROM base-efa (NOT slurm-src — needs OMPI5 libpmix)".
+# libpmix from /opt/amazon/pmix (installed via base-efa's libpmix-aws deb)
+# and libnvidia-ml-dev from the CUDA parent image.
 #
-# Patches (A3) applied to unpacked source tree before debuild:
+# Patches applied to the unpacked source tree before debuild:
 #   - debian/control:    adds libnvidia-ml-dev Build-Depends
-#   - debian/rules:      adds --with-nvml + --with-pmix=/opt/amazon/openmpi5
+#   - debian/rules:      adds --with-nvml + --with-pmix=/opt/amazon/pmix
 #   - debian/changelog:  new entry ${SLURM_VERSION}-1${SLURM_DEB_PATCH_REV}
 FROM base-efa AS slurm-build
 
@@ -288,7 +290,7 @@ COPY --from=slurm-src /workspace/${SLURM_DIR} ${SLURM_DIR}
 COPY patches/ /tmp/patches/
 
 RUN <<EOR
-# Apply SchedMD debian/ patches (A3) before build-dep resolution.
+# Apply SchedMD debian/ patches before build-dep resolution.
 set -xeuo pipefail
 cd /tmp/${SLURM_DIR}
 for p in /tmp/patches/debian-control-nvml.patch \
@@ -316,10 +318,13 @@ FROM slurm-build AS build
 ################################################################################
 # base-extra — Slinky extras MINUS openmpi apt (OMPI comes from /opt/amazon/openmpi5).
 #
-# Plan §2 / outline §2: "Slinky extras MINUS openmpi-bin/openmpi-common/
-# libopenmpi-dev; KEEP libpmix2-equivalent (provided via /opt/amazon/openmpi5);
-# add gawk socat authselect sssd openssh-server" (gawk/socat/authselect/sssd/
-# ssh moved to slurmd stage where they are used).
+# Upstream Slinky installs openmpi-bin/openmpi-common/libopenmpi-dev here; we
+# omit them because the EFA installer already provides OMPI5 at
+# /opt/amazon/openmpi5 and pulling a second OMPI tree from apt breaks
+# OPAL_PREFIX resolution at runtime. The PMIx client library previously
+# sourced from libpmix2 apt is supplied via libpmix-aws (/opt/amazon/pmix).
+# gawk / socat / authselect / sssd / openssh-server moved to the slurmd
+# target below, which is where they are actually used.
 FROM base-efa AS base-extra
 
 SHELL ["bash", "-c"]
@@ -426,10 +431,12 @@ ENTRYPOINT ["entrypoint.sh"]
 ################################################################################
 # slurmd — compute daemon with CUDA + EFA + OMPI5 PMIx runtime.
 #
-# Runtime env per plan §6 / outline §6:
+# Runtime env:
 #   PATH            prepend /opt/amazon/${OMPI_DEFAULT}/bin + /opt/amazon/efa/bin
 #   LD_LIBRARY_PATH prepend EFA + OMPI5 + ofi-nccl + CUDA
-#   OPAL_PREFIX     /opt/amazon/${OMPI_DEFAULT}  (research doc line 415)
+#   OPAL_PREFIX     /opt/amazon/${OMPI_DEFAULT}  (required by OMPI so it finds
+#                                                 its own prrte/libevent/etc.
+#                                                 outside /usr/{lib,share})
 #   FI_EFA_USE_DEVICE_RDMA=1        (p4/p5/p6 GPUDirect RDMA)
 #   FI_EFA_FORK_SAFE=1              (if app forks)
 #   NCCL_SOCKET_IFNAME=^docker,lo,veth  (exclude container virt interfaces)
