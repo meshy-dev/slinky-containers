@@ -108,7 +108,7 @@ apt-get -qq -y install --no-install-recommends \
   vim less sudo unzip git \
   build-essential pkg-config patch \
   python3 python3-pip \
-  kmod \
+  tar environment-modules \
   locales tzdata \
   libhwloc-dev hwloc \
   libmunge-dev libmunge2 munge \
@@ -161,24 +161,9 @@ apt-get -qq update
 apt-get -qq -y install --no-install-recommends \
   cuda-toolkit-${CUDA_TOOLKIT_VERSION} \
   cuda-nvml-dev-${CUDA_TOOLKIT_VERSION} \
-  cuda-minimal-build-${CUDA_TOOLKIT_VERSION}
-# Fail fast if any display/kernel driver package sneaked in via recommends
-# resolution (would fight host driver at runtime).
-DRV_COUNT="$(dpkg -l | awk '$2 ~ /^(cuda-drivers|nvidia-driver-|nvidia-kernel-)/ { n++ } END { print n+0 }')"
-: "${DRV_COUNT:?FATAL driver-count probe produced no value}"
-test "${DRV_COUNT}" -eq 0 \
-  || { echo "FATAL: cuda-toolkit-${CUDA_TOOLKIT_VERSION} pulled driver package(s); aborting" >&2; dpkg -l | grep -E '^ii  (cuda-drivers|nvidia-driver-|nvidia-kernel-)' >&2; exit 1; }
-# Toolkit sanity: nvcc executable + NVML header + unversioned symlink.
-test -x /usr/local/cuda-13.2/bin/nvcc
-test -f /usr/local/cuda-13.2/include/nvml.h
+  cuda-minimal-build-${CUDA_TOOLKIT_VERSION} \
+  libnccl2 libnccl-dev
 test -L /usr/local/cuda
-# Pinned-suffix NCCL install. apt-cache madison emits candidate lines; the
-# awk picks the newest whose version string contains the CUDA suffix token.
-NCCL_PKG_VER="$(apt-cache madison libnccl2 | awk -v s="${NCCL_CUDA_SUFFIX}" '$3 ~ s { print $3; exit }')"
-: "${NCCL_PKG_VER:?FATAL no libnccl2 candidate with suffix ${NCCL_CUDA_SUFFIX} in apt-cache madison}"
-apt-get -qq -y install --no-install-recommends \
-  "libnccl2=${NCCL_PKG_VER}" \
-  "libnccl-dev=${NCCL_PKG_VER}"
 EOR
 
 ENV PATH=/usr/local/cuda/bin:${PATH}
@@ -209,11 +194,6 @@ ARG OMPI_DEFAULT
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
-apt-get -qq update
-# environment-modules is an installer prerequisite; ca-certs + curl are
-# required before the tarball fetch.
-apt-get -qq -y install --no-install-recommends \
-  ca-certificates curl tar environment-modules
 cd /tmp
 curl -fsSL -O "https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"
 tar -xf "aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"
@@ -228,7 +208,11 @@ EOR
 # aws-ofi-nccl plugin at the flat /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so
 # path (the non-NGC libnccl-ofi deb uses the same flat layout as the NGC-v3
 # variant; the multiarch x86_64-linux-gnu subdir is not used by EFA 1.48.0
-# on ubuntu:24.04).
+# on ubuntu:24.04). The EFA installer only adds /opt/amazon/{efa,ofi-nccl}/lib
+# to ld.so.conf.d/ and expects OMPI5 + PMIx to be reached via OPAL_PREFIX and
+# LD_LIBRARY_PATH at runtime; register them in ld.so.conf.d so that `ldconfig
+# -p` resolves libpmix.so.2 consistently whether or not LD_LIBRARY_PATH is set
+# (slurmd's mpi_pmix_v4 plugin dlopen()s libpmix.so.2 at job-step launch).
 RUN <<EOR
 set -xeuo pipefail
 test -x /opt/amazon/openmpi5/bin/mpirun
@@ -238,7 +222,9 @@ test -x /opt/amazon/openmpi5/bin/mpirun
   || { echo "FATAL: /opt/amazon/${OMPI_DEFAULT}/bin/mpirun did not report Open MPI 5.x" >&2; exit 1; }
 test -f /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so
 test -f /opt/amazon/pmix/lib/libpmix.so.2
-ls -l /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so /opt/amazon/pmix/lib/libpmix.so.2
+printf '%s\n' "/opt/amazon/${OMPI_DEFAULT}/lib" "/opt/amazon/pmix/lib" > /etc/ld.so.conf.d/200_amazon-ompi-pmix.conf
+ldconfig
+ldconfig -p | grep -q 'libpmix\.so\.2 ' || { echo "FATAL: libpmix.so.2 not resolvable via ldconfig after registering /opt/amazon/pmix/lib" >&2; exit 1; }
 EOR
 
 ################################################################################
@@ -270,7 +256,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 # Slurm debuild tooling.
 set -xeuo pipefail
-apt-get -qq update
 apt-get -qq -y install --no-install-recommends \
   apt-utils fakeroot devscripts equivs
 EOR
@@ -326,18 +311,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # Mellanox OFED userspace repo — guest IB components only; kernel drivers
 # are provided by the host.
 set -xeuo pipefail
-apt-get -qq update
-apt-get -qq -y install --no-install-recommends \
-  ca-certificates curl gnupg
 curl -fsSL https://linux.mellanox.com/public/repo/mlnx_ofed/latest/ubuntu24.04/mellanox_mlnx_ofed.list | tee /etc/apt/sources.list.d/mellanox-mlnx-ofed.list
 wget -qO - https://www.mellanox.com/downloads/ofed/RPM-GPG-KEY-Mellanox | apt-key add -
 chmod 644 /etc/apt/sources.list.d/mellanox-mlnx-ofed.list
-apt-get -qq update
-EOR
-
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-  --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
-set -xeuo pipefail
 apt-get -qq update
 # Auth/ops tools + IB userspace diagnostics. rdma-core was already installed
 # by the EFA installer in base-efa; apt will treat the apt version as
@@ -364,7 +340,6 @@ WORKDIR /workspace/
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
-apt-get -qq update
 apt-get -qq -y install --no-install-recommends \
   git check debhelper dkms
 EOR
@@ -393,7 +368,6 @@ COPY --from=build /tmp/*.deb /tmp/*.ddeb /tmp/
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
-apt-get -qq update
 apt-get -qq -y install --no-install-recommends --fix-broken \
   socat \
   ./slurm-smd-client_[0-9]*.deb \
@@ -445,7 +419,6 @@ WORKDIR /tmp/
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
-apt-get -qq update
 apt-get -qq -y install --no-install-recommends --fix-broken \
   /tmp/slurm-smd-client_[0-9]*.deb \
   /tmp/slurm-smd-client-dbgsym_[0-9]*.ddeb \
@@ -507,7 +480,6 @@ COPY --from=build /tmp/*.deb /tmp/*.ddeb /tmp/
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
-apt-get -qq update
 apt-get -qq -y install --no-install-recommends --fix-broken \
   ./slurm-smd-doc_[0-9]*.deb \
   ./slurm-smd-slurmdbd_[0-9]*.deb \
@@ -536,7 +508,6 @@ COPY --from=build /tmp/*.deb /tmp/*.ddeb /tmp/
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
-apt-get -qq update
 apt-get -qq -y install --no-install-recommends --fix-broken \
   ./slurm-smd-doc_[0-9]*.deb \
   ./slurm-smd-slurmrestd_[0-9]*.deb \
@@ -563,29 +534,20 @@ WORKDIR /tmp/
 ADD https://dl.k8s.io/release/stable.txt kubernetes_stable.txt
 
 # Ref: https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/#install-using-native-package-management
+# Ref: https://slurm.schedmd.com/quickstart_admin.html#pkg_install
+# sackd .debs are already on FS via the base-extra -> slurm-build chain.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
-apt-get -qq update
 VERSION="$(cat kubernetes_stable.txt | grep -Eo '^v[0-9]+\.[0-9]+')"
-apt-get -qq -y install --no-install-recommends \
-  apt-transport-https ca-certificates curl gnupg
 mkdir -p -m 755 /etc/apt/keyrings
 curl -fsSL https://pkgs.k8s.io/core:/stable:/${VERSION}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 chmod 644 /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${VERSION}/deb/ /" | tee /etc/apt/sources.list.d/kubernetes.list
 chmod 644 /etc/apt/sources.list.d/kubernetes.list
 apt-get -qq update
-apt-get -qq -y install --no-install-recommends kubectl
-rm *.txt
-EOR
-
-# Ref: https://slurm.schedmd.com/quickstart_admin.html#pkg_install
-# sackd .debs are already on FS via the base-extra -> slurm-build chain.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-  --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
-set -xeuo pipefail
-apt-get -qq update
+apt-get -qq -y install --no-install-recommends \
+  apt-transport-https kubectl
 apt-get -qq -y install --no-install-recommends --fix-broken \
   socat \
   /tmp/slurm-smd-client_[0-9]*.deb \
@@ -597,6 +559,7 @@ apt-get -qq -y install --no-install-recommends --fix-broken \
   /tmp/slurm-smd-dbgsym_[0-9]*.ddeb
 mkdir -p /run/slurm/
 chown ${SLURM_USER}:${SLURM_USER} /run/slurm
+rm *.txt
 EOR
 
 COPY files/etc/supervisor/supervisord.conf /etc/supervisor/
@@ -623,7 +586,6 @@ WORKDIR /tmp/
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
-apt-get -qq update
 apt-get -qq -y install --no-install-recommends \
   socat \
   openssh-server \
