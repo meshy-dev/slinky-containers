@@ -217,10 +217,24 @@ rm -rf aws-efa-installer "aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"
 EOR
 
 # Step 5-6: verify bundled ofi-nccl plugin + OMPI5 mpirun.
+# Plugin path in NGC-build-image mode: EFA installer installs the
+# libnccl-ofi-ngc-v3 deb which drops the plugin at
+# /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so (flat layout, no
+# x86_64-linux-gnu subdir). On non-NGC installs EFA instead installs
+# libnccl-ofi which uses the x86_64-linux-gnu subdir layout. Accept
+# either by listing both candidate paths, but require at least one.
 RUN <<EOR
 set -xeuo pipefail
 # Plugin path (bundled by EFA installer >= 1.35 per research doc §2):
-ls /opt/amazon/ofi-nccl/lib/*/libnccl-net-ofi*.so
+if ls /opt/amazon/ofi-nccl/lib/libnccl-net-ofi*.so >/dev/null 2>&1; then
+  ls -l /opt/amazon/ofi-nccl/lib/libnccl-net-ofi*.so
+elif ls /opt/amazon/ofi-nccl/lib/*/libnccl-net-ofi*.so >/dev/null 2>&1; then
+  ls -l /opt/amazon/ofi-nccl/lib/*/libnccl-net-ofi*.so
+else
+  echo "Error: no libnccl-net-ofi*.so found under /opt/amazon/ofi-nccl/lib" >&2
+  find /opt/amazon/ofi-nccl -name 'libnccl-*' >&2 || true
+  exit 1
+fi
 # OMPI5 mpirun sanity — must report "Open MPI 5."
 /opt/amazon/${OMPI_DEFAULT}/bin/mpirun --version | grep -E "Open MPI 5\." >/dev/null
 EOR
@@ -466,7 +480,7 @@ COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/slurmd-entrypoint.sh /usr/local/bin/entrypoint.sh
 
 ENV PATH=/opt/amazon/${OMPI_DEFAULT}/bin:/opt/amazon/efa/bin:/usr/local/cuda/bin:${PATH}
-ENV LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/amazon/${OMPI_DEFAULT}/lib:/opt/amazon/ofi-nccl/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:/usr/local/lib
+ENV LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/amazon/${OMPI_DEFAULT}/lib:/opt/amazon/ofi-nccl/lib:/opt/amazon/ofi-nccl/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:/usr/local/lib
 ENV OPAL_PREFIX=/opt/amazon/${OMPI_DEFAULT}
 ENV FI_EFA_USE_DEVICE_RDMA=1
 ENV FI_EFA_FORK_SAFE=1
