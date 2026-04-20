@@ -20,7 +20,7 @@ variable "CUDA_TOOLKIT_VERSION"   { default = "13-2" }
 variable "SLURM_VERSION_CUDA_EFA" { default = "25.11.5" }
 variable "SLURM_DEB_PATCH_REV"    { default = "meshy1" }
 variable "EFA_INSTALLER_VERSION"  { default = "1.48.0" }
-variable "EFA_INSTALLER_FLAGS"    { default = "-y --skip-kmod --skip-limit-conf --no-verify" }
+variable "EFA_INSTALLER_FLAGS"    { default = "-y --skip-kmod --skip-limit-conf --no-verify --mpi=openmpi5" }
 variable "OMPI_DEFAULT"           { default = "openmpi5" }
 variable "NCCL_CUDA_SUFFIX"       { default = "cuda13.2" }
 variable "NVCC_GENCODE"           { default = "-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100" }

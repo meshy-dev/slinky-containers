@@ -10,7 +10,11 @@
 # SLURM_VERSION           Upstream SchedMD slurm source version (e.g. 25.11.5).
 # SLURM_DEB_PATCH_REV     Local .deb patch revision stamped into debian/changelog.
 # EFA_INSTALLER_VERSION   aws-efa-installer release version.
-# EFA_INSTALLER_FLAGS     Flags passed to ./efa_installer.sh (MUST NOT include --skip-mpi).
+# EFA_INSTALLER_FLAGS     Flags passed to ./efa_installer.sh. Includes --mpi=openmpi5
+#                         so only the OMPI 5 stack (+ libpmix-aws + prrte-aws) is laid
+#                         down under /opt/amazon/openmpi5; the OMPI 4 tree at
+#                         /opt/amazon/openmpi is never created. Do not pass --skip-mpi
+#                         (that would skip OMPI 5 too).
 # OMPI_DEFAULT            Which bundled OMPI tree to export on runtime PATH (openmpi5).
 # NCCL_CUDA_SUFFIX        apt version suffix for libnccl2/libnccl-dev (e.g. cuda13.2).
 # NVCC_GENCODE            NVCC gencode flags passed through to NCCL / plugin builds.
@@ -23,7 +27,7 @@ ARG SLURM_VERSION=25.11.5
 ARG SLURM_VERSION_MICRO=1
 ARG SLURM_DEB_PATCH_REV=meshy1
 ARG EFA_INSTALLER_VERSION=1.48.0
-ARG EFA_INSTALLER_FLAGS="-y --skip-kmod --skip-limit-conf --no-verify"
+ARG EFA_INSTALLER_FLAGS="-y --skip-kmod --skip-limit-conf --no-verify --mpi=openmpi5"
 ARG OMPI_DEFAULT=openmpi5
 ARG NCCL_CUDA_SUFFIX=cuda13.2
 ARG NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100"
@@ -169,14 +173,17 @@ EOR
 ENV PATH=/usr/local/cuda/bin:${PATH}
 
 ################################################################################
-# base-efa — AWS EFA installer: libfabric-aws + OMPI4 + OMPI5 + aws-ofi-nccl.
+# base-efa — AWS EFA installer: libfabric-aws + OMPI5 + aws-ofi-nccl.
 #
 # Plain ubuntu:24.04 has no /opt/nvidia/nvidia_entrypoint.sh marker, so the
 # EFA installer runs in normal (non-NGC) mode: it installs its own bundled
-# rdma-core v61, its own OMPI4 + OMPI5 trees, its own PMIx under
-# /opt/amazon/pmix, and the non-NGC aws-ofi-nccl plugin. No manual rdma-core
-# preinstall, no manual libpmix-aws/prrte-aws/openmpi50-aws dpkg -i, and no
-# --skip-mpi flag are needed.
+# rdma-core v61, its OMPI 5 tree (openmpi50-aws + libpmix-aws + prrte-aws)
+# under /opt/amazon/openmpi5 and /opt/amazon/pmix, and the non-NGC
+# aws-ofi-nccl plugin. The EFA_INSTALLER_FLAGS ARG passes --mpi=openmpi5 so
+# the installer selects only the OMPI 5 flavor (valid choices per 1.48.0
+# --help: openmpi4,openmpi5,none); the OMPI 4 tree at /opt/amazon/openmpi is
+# never laid down. No manual dpkg -i and no package removals are needed —
+# dependency resolution still goes through the installer's apt codepath.
 #
 # OMPI5 + its bundled PMIx v4 are required by slurm-build:
 #   --with-pmix=/opt/amazon/pmix in debian-rules-nvml-pmix.patch makes slurmd
@@ -222,6 +229,18 @@ test -x /opt/amazon/openmpi5/bin/mpirun
   || { echo "FATAL: /opt/amazon/${OMPI_DEFAULT}/bin/mpirun did not report Open MPI 5.x" >&2; exit 1; }
 test -f /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so
 test -f /opt/amazon/pmix/lib/libpmix.so.2
+# /opt/amazon/openmpi (OMPI 4 tree) must NOT exist: --mpi=openmpi5 in
+# EFA_INSTALLER_FLAGS selects only the OMPI 5 flavor. Catching a stray OMPI 4
+# install surfaces upstream flag drift (e.g., someone reverting to default
+# flags or appending --mpi=openmpi4) before it ships.
+test ! -e /opt/amazon/openmpi \
+  || { echo "FATAL: /opt/amazon/openmpi exists; EFA installer laid down OMPI 4 despite --mpi=openmpi5" >&2; exit 1; }
+# openmpi40-aws deb must not be installed either. `dpkg -l openmpi40-aws`
+# exits nonzero when the package is unknown to dpkg; we invert with `!` so
+# the fail-fast || branch fires only if dpkg DID find the package installed.
+# Redirect both streams to /dev/null so the negative path stays quiet.
+! dpkg -l openmpi40-aws >/dev/null 2>&1 \
+  || { echo "FATAL: openmpi40-aws deb is installed; EFA_INSTALLER_FLAGS must pass --mpi=openmpi5 (not default, not --mpi=openmpi4)" >&2; exit 1; }
 printf '%s\n' "/opt/amazon/${OMPI_DEFAULT}/lib" "/opt/amazon/pmix/lib" > /etc/ld.so.conf.d/200_amazon-ompi-pmix.conf
 ldconfig
 ldconfig -p | grep -q 'libpmix\.so\.2 ' || { echo "FATAL: libpmix.so.2 not resolvable via ldconfig after registering /opt/amazon/pmix/lib" >&2; exit 1; }
