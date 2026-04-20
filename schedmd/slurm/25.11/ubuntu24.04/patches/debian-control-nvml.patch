@@ -1,0 +1,28 @@
+Description: Add libnvidia-ml-dev build-dep and drop apt libpmix-dev.
+ NVML dev headers enable --with-nvml=/usr/local/cuda configure flag so
+ slurmd links libnvidia-ml.so at runtime. libpmix-dev is removed
+ because PMIx is provided by the AWS EFA installer's OMPI5 tree at
+ /opt/amazon/openmpi5 (see debian/rules --with-pmix= patch). Shipping
+ both apt libpmix and OMPI5 libpmix would create an ABI-conflicting
+ second PMIx tree.
+Author: meshy-dev
+Forwarded: not-needed
+Last-Update: 2026-04-19
+--- a/debian/control
++++ b/debian/control
+@@ -14,6 +14,7 @@ Build-Depends:
+  libgtk2.0-dev,
+  libhdf5-dev,
+  libhttp-parser-dev,
++ libnvidia-ml-dev,
+  libhwloc-dev,
+  libipmimonitoring-dev,
+  libjson-c-dev,
+@@ -25,7 +26,6 @@ Build-Depends:
+  libncurses-dev,
+  libpam0g-dev,
+  libperl-dev,
+- libpmix-dev,
+  librdkafka-dev,
+  librrd-dev,
+  libyaml-dev,

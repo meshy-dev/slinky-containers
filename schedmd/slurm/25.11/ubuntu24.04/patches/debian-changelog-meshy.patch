@@ -1,0 +1,22 @@
+Description: Prepend meshy-dev downstream changelog entry.
+ New source package version is 25.11.0-1meshy1 (matches
+ ${SLURM_VERSION}-1${SLURM_DEB_PATCH_REV} with the SLURM_DEB_PATCH_REV
+ Dockerfile ARG defaulting to meshy1). debuild emits .deb filenames
+ stamped with this revision so produced artifacts are distinguishable
+ from upstream SchedMD .debs.
+Author: meshy-dev
+Forwarded: not-needed
+Last-Update: 2026-04-19
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,10 @@
++slurm-smd (25.11.0-1meshy1) UNRELEASED; urgency=medium
++
++  * Add --with-nvml=/usr/local/cuda and --with-pmix=/opt/amazon/openmpi5
++  * Add libnvidia-ml-dev to Build-Depends; drop apt libpmix-dev.
++
++ -- meshy-dev <dev@meshy.ai>  Sun, 19 Apr 2026 00:00:00 +0000
++
+ slurm-smd (25.11.0-1) UNRELEASED; urgency=medium
+ 
+   * Initial release.

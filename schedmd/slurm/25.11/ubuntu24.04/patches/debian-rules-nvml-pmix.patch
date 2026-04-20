@@ -1,0 +1,25 @@
+Description: Configure Slurm with NVML + OMPI5-path PMIx.
+ --with-nvml=/usr/local/cuda tells slurm's GPU autodetect plugin to
+ link libnvidia-ml at build time, enabling slurmd GPU enumeration via
+ NVML (required for GresTypes=gpu + GPUs GRES binding on forles B200
+ nodes).
+ --with-pmix=/opt/amazon/openmpi5 points slurmd's mpi/pmix plugin at
+ the PMIx tree shipped inside the AWS EFA installer's OMPI5 bundle.
+ This keeps slurmd's PMIx ABI matched to the OMPI5 libmpi that user
+ jobs launch through srun --mpi=pmix. Without the explicit path, the
+ configure script picks up whatever /usr/lib64/libpmix.so exists,
+ which on CUDA-base images is either nothing or a stale apt PMIx.
+Author: meshy-dev
+Forwarded: not-needed
+Last-Update: 2026-04-19
+--- a/debian/rules
++++ b/debian/rules
+@@ -20,7 +20,7 @@ override_dh_autoreconf:
+ override_dh_auto_configure:
+ 	# Run with --disable-debug to allow optimizations, -g is still provided
+ 	# by dpkg-buildflags.
+-	dh_auto_configure -- --sysconfdir=/etc/slurm --disable-debug --with-mysql_config --with-slurmrestd --with-pmix --enable-pam --with-pam_dir=/usr/lib/$(DEB_HOST_MULTIARCH)/security --with-systemdsystemunitdir=/lib/systemd/system/ SUCMD=/bin/su SLEEP_CMD=/bin/sleep
++	dh_auto_configure -- --sysconfdir=/etc/slurm --disable-debug --with-mysql_config --with-slurmrestd --with-pmix=/opt/amazon/openmpi5 --with-nvml=/usr/local/cuda --enable-pam --with-pam_dir=/usr/lib/$(DEB_HOST_MULTIARCH)/security --with-systemdsystemunitdir=/lib/systemd/system/ SUCMD=/bin/su SLEEP_CMD=/bin/sleep
+ 
+ override_dh_auto_install:
+ 	dh_auto_install
