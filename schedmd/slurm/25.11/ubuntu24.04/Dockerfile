@@ -171,16 +171,45 @@ apt-get -qq -y autoremove
 EOR
 
 # Step 2-4: fetch and run EFA installer (container-safe flags, with OMPI5).
+#
+# rdma-core handling in a CUDA devel container:
+#  - nvidia/cuda:*-devel-ubuntu24.04 has /opt/nvidia/nvidia_entrypoint.sh,
+#    which causes efa_installer.sh to auto-detect the "NGC build image" case
+#    (see efa_installer.sh NGC detection path, ~lines 1320-1420). In that
+#    mode the installer *skips* installing its own bundled rdma-core v61
+#    debs and assumes the base image already provides rdma-core.
+#  - Ubuntu 24.04 apt ships rdma-core v50, but EFA 1.48's libfabric1-aws
+#    deb has `Depends: ibverbs-providers (>= 59)`, so dpkg -i of
+#    libfabric1-aws fails with unsatisfied deps against apt v50.
+#
+# Fix: pre-install the EFA-bundled rdma-core v61 debs with dpkg before
+# efa_installer.sh runs. We install the bundle locally from the extracted
+# tarball to avoid an extra download and to guarantee version alignment
+# with the EFA release being installed. libnl-* are apt deps of those
+# rdma-core v61 debs and have no conflicting bundled version.
+#
+# environment-modules + curl + tar are installer prerequisites. ca-certs
+# must be present before curl fetches the tarball.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends \
-  ca-certificates curl tar environment-modules
+  ca-certificates curl tar environment-modules \
+  libnl-3-200 libnl-route-3-200
 cd /tmp
 curl -fsSL -O "https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"
 tar -xf "aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"
-cd aws-efa-installer
+# Pre-install bundled rdma-core v61 runtime debs so libfabric1-aws's
+# Depends: ibverbs-providers (>= 59) can be satisfied by dpkg -i. We
+# install only the runtime shared libs (not -dev headers or diag tools)
+# to keep the image minimal.
+cd aws-efa-installer/DEBS/UBUNTU2404/x86_64/rdma-core
+dpkg -i \
+  libibverbs1_*.deb \
+  ibverbs-providers_*.deb \
+  librdmacm1_*.deb
+cd /tmp/aws-efa-installer
 # shellcheck disable=SC2086
 ./efa_installer.sh ${EFA_INSTALLER_FLAGS}
 cd /tmp
