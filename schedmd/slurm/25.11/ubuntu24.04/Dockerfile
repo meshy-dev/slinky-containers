@@ -194,9 +194,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
 apt-get -qq update
+# Prerequisites: installer itself + apt-only runtime deps of bundled
+# OMPI5 / PMIx / prrte debs (libevent-*, libhwloc15, zlib1g, libnl-*).
 apt-get -qq -y install --no-install-recommends \
   ca-certificates curl tar environment-modules \
-  libnl-3-200 libnl-route-3-200
+  libnl-3-200 libnl-route-3-200 \
+  libevent-core-2.1-7t64 libevent-pthreads-2.1-7t64 \
+  libhwloc15 zlib1g
 cd /tmp
 curl -fsSL -O "https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"
 tar -xf "aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"
@@ -212,6 +216,24 @@ dpkg -i \
 cd /tmp/aws-efa-installer
 # shellcheck disable=SC2086
 ./efa_installer.sh ${EFA_INSTALLER_FLAGS}
+
+# EFA installer in NGC-build-image mode only installs libfabric +
+# ofi-nccl plugin; it deliberately skips MPI packages (expects the
+# NGC parent image to provide them). We need OMPI5 + its PMIx tree
+# for two reasons:
+#   1. slurm-build stage configures with --with-pmix=/opt/amazon/openmpi5
+#      (debian-rules-nvml-pmix.patch) so slurmd links the same PMIx ABI
+#      that user jobs will use via srun --mpi=pmix.
+#   2. user jobs invoke /opt/amazon/openmpi5/bin/mpirun at runtime.
+# Install the three bundled debs (libpmix-aws -> prrte-aws -> openmpi50-aws)
+# in dependency order using dpkg -i on the local bundle to guarantee
+# version alignment with the EFA release.
+cd /tmp/aws-efa-installer/DEBS/UBUNTU2404/x86_64
+dpkg -i \
+  libpmix-aws_*.deb \
+  prrte-aws_*.deb \
+  openmpi50-aws_*.deb
+
 cd /tmp
 rm -rf aws-efa-installer "aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"
 EOR
