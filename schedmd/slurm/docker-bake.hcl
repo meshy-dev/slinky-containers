@@ -15,11 +15,12 @@ variable "SUFFIX" {}
 # schedmd/slurm/25.11/ubuntu24.04/Dockerfile; overriding either here or via
 # --set slurmd-cuda-efa.args.* must keep the two in sync.
 
-variable "CUDA_BASE_TAG"          { default = "13.2.1-devel-ubuntu24.04" }
+variable "PARENT_IMAGE"           { default = "ubuntu:24.04" }
+variable "CUDA_TOOLKIT_VERSION"   { default = "13-2" }
 variable "SLURM_VERSION_CUDA_EFA" { default = "25.11.5" }
 variable "SLURM_DEB_PATCH_REV"    { default = "meshy1" }
 variable "EFA_INSTALLER_VERSION"  { default = "1.48.0" }
-variable "EFA_INSTALLER_FLAGS"    { default = "-y -g -d --skip-kmod --skip-limit-conf --no-verify" }
+variable "EFA_INSTALLER_FLAGS"    { default = "-y --skip-kmod --skip-limit-conf --no-verify" }
 variable "OMPI_DEFAULT"           { default = "openmpi5" }
 variable "NCCL_CUDA_SUFFIX"       { default = "cuda13.2" }
 variable "NVCC_GENCODE"           { default = "-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100" }
@@ -306,7 +307,8 @@ target "slurmd-cuda-efa" {
   target = "slurmd"
   platforms = ["linux/amd64"]
   args = {
-    CUDA_BASE_TAG         = CUDA_BASE_TAG
+    PARENT_IMAGE          = PARENT_IMAGE
+    CUDA_TOOLKIT_VERSION  = CUDA_TOOLKIT_VERSION
     SLURM_VERSION         = SLURM_VERSION_CUDA_EFA
     SLURM_DEB_PATCH_REV   = SLURM_DEB_PATCH_REV
     EFA_INSTALLER_VERSION = EFA_INSTALLER_VERSION
@@ -315,7 +317,6 @@ target "slurmd-cuda-efa" {
     NCCL_CUDA_SUFFIX      = NCCL_CUDA_SUFFIX
     NVCC_GENCODE          = NVCC_GENCODE
     DEBIAN_FRONTEND       = DEBIAN_FRONTEND
-    PARENT_IMAGE          = "nvidia/cuda:${CUDA_BASE_TAG}"
   }
   tags = compact([
     "${REGISTRY}/slurmd:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-efa",

@@ -5,28 +5,29 @@
 ################################################################################
 # Build args
 #
-# CUDA_BASE_TAG          NVIDIA CUDA devel image tag (consumed via PARENT_IMAGE)
-# SLURM_VERSION          Upstream SchedMD slurm source version (e.g. 25.11.5)
-# SLURM_DEB_PATCH_REV    Local .deb patch revision stamped into debian/changelog
-# EFA_INSTALLER_VERSION  aws-efa-installer release version
-# EFA_INSTALLER_FLAGS    Flags passed to ./efa_installer.sh (MUST NOT include --skip-mpi)
-# OMPI_DEFAULT           Which bundled OMPI tree to export on runtime PATH (openmpi5)
-# NCCL_CUDA_SUFFIX       apt version suffix for libnccl2/libnccl-dev (e.g. cuda13.2)
-# NVCC_GENCODE           NVCC gencode flags passed through to NCCL / plugin builds
-# DEBIAN_FRONTEND        standard apt noninteractive
+# PARENT_IMAGE            Base image for all CUDA/EFA stages (ubuntu:24.04).
+# CUDA_TOOLKIT_VERSION    apt suffix for cuda-toolkit packages (e.g. 13-2).
+# SLURM_VERSION           Upstream SchedMD slurm source version (e.g. 25.11.5).
+# SLURM_DEB_PATCH_REV     Local .deb patch revision stamped into debian/changelog.
+# EFA_INSTALLER_VERSION   aws-efa-installer release version.
+# EFA_INSTALLER_FLAGS     Flags passed to ./efa_installer.sh (MUST NOT include --skip-mpi).
+# OMPI_DEFAULT            Which bundled OMPI tree to export on runtime PATH (openmpi5).
+# NCCL_CUDA_SUFFIX        apt version suffix for libnccl2/libnccl-dev (e.g. cuda13.2).
+# NVCC_GENCODE            NVCC gencode flags passed through to NCCL / plugin builds.
+# DEBIAN_FRONTEND         standard apt noninteractive.
 ################################################################################
 
-ARG CUDA_BASE_TAG=13.2.1-devel-ubuntu24.04
+ARG PARENT_IMAGE=ubuntu:24.04
+ARG CUDA_TOOLKIT_VERSION=13-2
 ARG SLURM_VERSION=25.11.5
 ARG SLURM_VERSION_MICRO=1
 ARG SLURM_DEB_PATCH_REV=meshy1
 ARG EFA_INSTALLER_VERSION=1.48.0
-ARG EFA_INSTALLER_FLAGS="-y -g -d --skip-kmod --skip-limit-conf --no-verify"
+ARG EFA_INSTALLER_FLAGS="-y --skip-kmod --skip-limit-conf --no-verify"
 ARG OMPI_DEFAULT=openmpi5
 ARG NCCL_CUDA_SUFFIX=cuda13.2
 ARG NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100"
 ARG SLURM_DIR=slurm
-ARG PARENT_IMAGE=nvidia/cuda:${CUDA_BASE_TAG}
 
 ################################################################################
 # slurm-src — alpine sidecar: fetch + extract SchedMD slurm source tarball.
@@ -49,7 +50,13 @@ RUN \
   rm ${SLURM_TAR}
 
 ################################################################################
-# base — CUDA devel parent + SchedMD baseline userland.
+# base — plain Ubuntu 24.04 + SchedMD build/runtime userland.
+#
+# NVIDIA_* env vars below are read by nvidia-container-toolkit at `docker run`
+# time to inject the host driver libraries (libcuda.so, libnvidia-ml.so.1) into
+# the container. Plain ubuntu base does not set these automatically the way
+# nvidia/cuda:*-devel images do; they must be declared here so kubelet +
+# nvidia-container-runtime populate the mount correctly at slurmd pod start.
 FROM ${PARENT_IMAGE} AS base
 
 SHELL ["bash", "-c"]
@@ -59,6 +66,10 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG SLURM_VERSION
 ENV SLURM_VERSION=${SLURM_VERSION}
 
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV NVIDIA_REQUIRE_CUDA="cuda>=13.2"
+
 USER root
 WORKDIR /tmp/
 
@@ -67,25 +78,26 @@ ARG SLURM_USER_UID=401
 ARG SLURM_USER_GID=401
 
 RUN <<EOR
-# Create SlurmUser
+# Remove the default `ubuntu` user (uid 1000) that ships in ubuntu:24.04 so
+# it does not collide with cluster-side uid ranges from sssd. userdel --remove
+# on a single known entry is deterministic; no conditional loop needed.
+set -xeuo pipefail
+userdel --remove ubuntu
+EOR
+
+RUN <<EOR
+# Create SlurmUser.
 set -xeuo pipefail
 groupadd --system --gid=${SLURM_USER_GID} ${SLURM_USER}
 useradd --system --no-log-init --uid=${SLURM_USER_UID} --gid=${SLURM_USER_GID} --shell=/usr/sbin/nologin ${SLURM_USER}
 EOR
 
-RUN <<EOR
-# Remove pre-created users from parent CUDA image.
-# Base nvidia/cuda:13.2.1-devel-ubuntu24.04 ships a single 'ubuntu' user under
-# /home; userdel --remove succeeds cleanly (mail spool absence is informational).
-set -xeuo pipefail
-for user in $(ls /home/); do
-  userdel --remove "$user"
-done
-EOR
-
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
-# Baseline apt deps — init, debug, QoL
+# Baseline apt deps — SchedMD build-deps (cross-checked against upstream
+# debian/control Build-Depends), SSL/crypto/json libs, PAM + MariaDB client
+# libs for slurm auth/accounting, locale data, and runtime QoL (tini, gosu,
+# supervisor). Kept as one layer to share the apt cache mount.
 set -xeuo pipefail
 apt-get -qq update
 apt-get -qq -y upgrade
@@ -94,68 +106,97 @@ apt-get -qq -y install --no-install-recommends \
   supervisor \
   procps iputils-ping ncurses-bin \
   vim less sudo unzip git \
-  build-essential pkg-config \
-  libhwloc-dev libmunge-dev libmunge2 munge
+  build-essential pkg-config patch \
+  python3 python3-pip \
+  kmod \
+  locales tzdata \
+  libhwloc-dev hwloc \
+  libmunge-dev libmunge2 munge \
+  libjson-c-dev libyaml-dev liblz4-dev libssl-dev \
+  libhttp-parser-dev libjwt-dev libdbus-1-dev \
+  libpam0g-dev libmariadb-dev
+# Locale+TZ defaults so debuild and slurm logs emit ASCII UTC timestamps
+# deterministically across build hosts.
+locale-gen en_US.UTF-8
+ln -fs /usr/share/zoneinfo/UTC /etc/localtime
 EOR
 
+ENV LANG=en_US.UTF-8
+ENV LANGUAGE=en_US:en
+ENV LC_ALL=en_US.UTF-8
+
 ################################################################################
-# base-cuda — NCCL apt pinned to ${NCCL_CUDA_SUFFIX}.
+# base-cuda — CUDA toolkit + NCCL from NVIDIA network repo (driver-free).
 #
-# Rationale: install NCCL BEFORE base-efa so the EFA installer can see an
-# existing NCCL and link the ofi-nccl plugin consistently. Image DAG:
-# base → base-cuda → base-efa. If a future EFA installer release is observed
-# to purge libnccl2, swap the DAG order (install EFA first, then NCCL).
+# Installing cuda-toolkit-${CUDA_TOOLKIT_VERSION} with --no-install-recommends
+# pulls nvcc + runtime libs + the /usr/local/cuda alternatives symlink without
+# pulling cuda-drivers (those live under separate meta packages). Runtime
+# libnvidia-ml / libcuda come from the host driver at `docker run` time via
+# nvidia-container-toolkit keyed on NVIDIA_* env vars set in `base`.
 #
-# Package suffix pin (e.g. libnccl2=*+cuda13.2) guards against NCCL↔CUDA ABI
-# skew: the CUDA network repo ships multiple libnccl2 builds per NCCL
-# release, one per CUDA major.minor, and grabbing the wrong one yields
-# symbol mismatches against the CUDA runtime in the parent image.
+# Package suffix pin on libnccl2 / libnccl-dev (e.g. *+cuda13.2) guards against
+# NCCL↔CUDA ABI skew: the CUDA network repo ships multiple libnccl2 builds per
+# NCCL release, one per CUDA major.minor, and grabbing the wrong one yields
+# symbol mismatches against the CUDA runtime.
 FROM base AS base-cuda
 
 SHELL ["bash", "-c"]
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG CUDA_TOOLKIT_VERSION
 ARG NCCL_CUDA_SUFFIX
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
-# Install NCCL from the CUDA network repo shipped in the parent image.
 set -xeuo pipefail
+# cuda-keyring installs the NVIDIA CUDA apt signing key + repo list under
+# /etc/apt/sources.list.d/cuda-ubuntu2404-x86_64.list.
+cd /tmp
+curl -fsSL -O https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+dpkg -i cuda-keyring_1.1-1_all.deb
+rm cuda-keyring_1.1-1_all.deb
 apt-get -qq update
-# Candidate selection: newest libnccl2/libnccl-dev whose version contains the
-# CUDA suffix token (e.g. "+cuda13.2"). apt-cache madison emits candidate lines;
-# `${var:?msg}` fails the RUN if awk returns empty (no matching candidate).
+# Driver-free toolkit + NVML dev headers + minimal compiler subset. --no-install-recommends
+# is essential: recommended deps include the display driver meta package.
+apt-get -qq -y install --no-install-recommends \
+  cuda-toolkit-${CUDA_TOOLKIT_VERSION} \
+  cuda-nvml-dev-${CUDA_TOOLKIT_VERSION} \
+  cuda-minimal-build-${CUDA_TOOLKIT_VERSION}
+# Fail fast if any display/kernel driver package sneaked in via recommends
+# resolution (would fight host driver at runtime).
+DRV_COUNT="$(dpkg -l | awk '$2 ~ /^(cuda-drivers|nvidia-driver-|nvidia-kernel-)/ { n++ } END { print n+0 }')"
+: "${DRV_COUNT:?FATAL driver-count probe produced no value}"
+test "${DRV_COUNT}" -eq 0 \
+  || { echo "FATAL: cuda-toolkit-${CUDA_TOOLKIT_VERSION} pulled driver package(s); aborting" >&2; dpkg -l | grep -E '^ii  (cuda-drivers|nvidia-driver-|nvidia-kernel-)' >&2; exit 1; }
+# Toolkit sanity: nvcc executable + NVML header + unversioned symlink.
+test -x /usr/local/cuda-13.2/bin/nvcc
+test -f /usr/local/cuda-13.2/include/nvml.h
+test -L /usr/local/cuda
+# Pinned-suffix NCCL install. apt-cache madison emits candidate lines; the
+# awk picks the newest whose version string contains the CUDA suffix token.
 NCCL_PKG_VER="$(apt-cache madison libnccl2 | awk -v s="${NCCL_CUDA_SUFFIX}" '$3 ~ s { print $3; exit }')"
-: "${NCCL_PKG_VER:?FATAL: no libnccl2 candidate matches suffix ${NCCL_CUDA_SUFFIX} in apt-cache madison}"
+: "${NCCL_PKG_VER:?FATAL no libnccl2 candidate with suffix ${NCCL_CUDA_SUFFIX} in apt-cache madison}"
 apt-get -qq -y install --no-install-recommends \
   "libnccl2=${NCCL_PKG_VER}" \
   "libnccl-dev=${NCCL_PKG_VER}"
 EOR
 
+ENV PATH=/usr/local/cuda/bin:${PATH}
+
 ################################################################################
 # base-efa — AWS EFA installer: libfabric-aws + OMPI4 + OMPI5 + aws-ofi-nccl.
 #
-# Install ordering (mirrors the canonical AWS EFA installer flow):
-#   1. apt install EFA build deps (ca-certificates curl tar hwloc etc.)
-#   2. fetch aws-efa-installer tarball
-#   3. pre-install EFA-bundled rdma-core v61 (satisfies libfabric1-aws deps)
-#   4. run ./efa_installer.sh ${EFA_INSTALLER_FLAGS}  (NO --skip-mpi)
-#   5. install EFA-bundled OMPI5 / PMIx / prrte debs (NGC-build-mode skips MPI)
-#   6. verify bundled ofi-nccl plugin .so is present
-#   7. verify mpirun is OMPI 5.x
-#   8. cleanup tarball
+# Plain ubuntu:24.04 has no /opt/nvidia/nvidia_entrypoint.sh marker, so the
+# EFA installer runs in normal (non-NGC) mode: it installs its own bundled
+# rdma-core v61, its own OMPI4 + OMPI5 trees, its own PMIx under
+# /opt/amazon/pmix, and the non-NGC aws-ofi-nccl plugin. No manual rdma-core
+# preinstall, no manual libpmix-aws/prrte-aws/openmpi50-aws dpkg -i, and no
+# --skip-mpi flag are needed.
 #
-# EFA_INSTALLER_FLAGS default = "-y -g -d --skip-kmod --skip-limit-conf --no-verify".
-# Do NOT append --skip-mpi here or --mpi=openmpi4 — the OMPI5 tree (and its
-# bundled PMIx v4) is required by slurm-build's --with-pmix=/opt/amazon/pmix
-# configure flag so slurmd links the PMIx ABI user jobs consume via srun.
-#
-# Note: no pre-install apt purge of ibverbs / libfabric / openmpi is performed.
-# The pinned CUDA 13.2.1 devel base does not ship any of those packages, and
-# base / base-cuda do not install them. The only rdma-core-adjacent package
-# later added is via the EFA installer's bundled v61 debs below; nothing in
-# earlier stages conflicts with them, so the old `apt-get remove` stanza
-# (formerly step 1) is dead code and has been removed.
+# OMPI5 + its bundled PMIx v4 are required by slurm-build:
+#   --with-pmix=/opt/amazon/pmix in debian-rules-nvml-pmix.patch makes slurmd
+#   link the PMIx ABI that user jobs consume at launch via srun --mpi=pmix.
+# User jobs then invoke /opt/amazon/openmpi5/bin/mpirun at runtime.
 FROM base-cuda AS base-efa
 
 SHELL ["bash", "-c"]
@@ -165,103 +206,52 @@ ARG EFA_INSTALLER_VERSION
 ARG EFA_INSTALLER_FLAGS
 ARG OMPI_DEFAULT
 
-# Fetch and run EFA installer (container-safe flags, with OMPI5).
-#
-# rdma-core handling in a CUDA devel container:
-#  - nvidia/cuda:*-devel-ubuntu24.04 has /opt/nvidia/nvidia_entrypoint.sh,
-#    which causes efa_installer.sh to auto-detect the "NGC build image" case
-#    (see efa_installer.sh NGC detection path, ~lines 1320-1420). In that
-#    mode the installer *skips* installing its own bundled rdma-core v61
-#    debs and assumes the base image already provides rdma-core.
-#  - Ubuntu 24.04 apt ships rdma-core v50, but EFA 1.48's libfabric1-aws
-#    deb has `Depends: ibverbs-providers (>= 59)`, so dpkg -i of
-#    libfabric1-aws fails with unsatisfied deps against apt v50.
-#
-# Fix: pre-install the EFA-bundled rdma-core v61 debs with dpkg before
-# efa_installer.sh runs. We install the bundle locally from the extracted
-# tarball to avoid an extra download and to guarantee version alignment
-# with the EFA release being installed. libnl-* are apt deps of those
-# rdma-core v61 debs and have no conflicting bundled version.
-#
-# environment-modules + curl + tar are installer prerequisites. ca-certs
-# must be present before curl fetches the tarball.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
 apt-get -qq update
-# Prerequisites: installer itself + apt-only runtime deps of bundled
-# OMPI5 / PMIx / prrte debs (libevent-*, libhwloc15, zlib1g, libnl-*).
+# environment-modules is an installer prerequisite; ca-certs + curl are
+# required before the tarball fetch.
 apt-get -qq -y install --no-install-recommends \
-  ca-certificates curl tar environment-modules \
-  libnl-3-200 libnl-route-3-200 \
-  libevent-core-2.1-7t64 libevent-pthreads-2.1-7t64 \
-  libhwloc15 zlib1g
+  ca-certificates curl tar environment-modules
 cd /tmp
 curl -fsSL -O "https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"
 tar -xf "aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"
-# Pre-install bundled rdma-core v61 runtime debs so libfabric1-aws's
-# Depends: ibverbs-providers (>= 59) can be satisfied by dpkg -i. We
-# install only the runtime shared libs (not -dev headers or diag tools)
-# to keep the image minimal.
-cd aws-efa-installer/DEBS/UBUNTU2404/x86_64/rdma-core
-dpkg -i \
-  libibverbs1_*.deb \
-  ibverbs-providers_*.deb \
-  librdmacm1_*.deb
-cd /tmp/aws-efa-installer
+cd aws-efa-installer
 # shellcheck disable=SC2086
 ./efa_installer.sh ${EFA_INSTALLER_FLAGS}
-
-# EFA installer in NGC-build-image mode only installs libfabric +
-# ofi-nccl plugin; it deliberately skips MPI packages (expects the
-# NGC parent image to provide them). We need OMPI5 + its PMIx tree
-# for two reasons:
-#   1. the slurm-build target configures with --with-pmix=/opt/amazon/pmix
-#      (debian-rules-nvml-pmix.patch) so slurmd links the same PMIx ABI
-#      that user jobs will use via srun --mpi=pmix.
-#   2. user jobs invoke /opt/amazon/openmpi5/bin/mpirun at runtime.
-# Install the three bundled debs (libpmix-aws -> prrte-aws -> openmpi50-aws)
-# in dependency order using dpkg -i on the local bundle to guarantee
-# version alignment with the EFA release.
-cd /tmp/aws-efa-installer/DEBS/UBUNTU2404/x86_64
-dpkg -i \
-  libpmix-aws_*.deb \
-  prrte-aws_*.deb \
-  openmpi50-aws_*.deb
-
 cd /tmp
 rm -rf aws-efa-installer "aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"
 EOR
 
-# Verify bundled ofi-nccl plugin + OMPI5 mpirun (fail-fast hard gates).
-# The pinned CUDA 13.2.1 devel base triggers the EFA installer's NGC-build-image
-# detection path, which installs the libnccl-ofi-ngc-v3 deb. That deb drops the
-# plugin at /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so (flat layout, no
-# x86_64-linux-gnu subdir). Path is deterministic under this base; check it
-# directly instead of branching over alternate layouts.
+# EFA post-install fail-fast gates. In non-NGC mode the installer drops the
+# aws-ofi-nccl plugin at the flat /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so
+# path (the non-NGC libnccl-ofi deb uses the same flat layout as the NGC-v3
+# variant; the multiarch x86_64-linux-gnu subdir is not used by EFA 1.48.0
+# on ubuntu:24.04).
 RUN <<EOR
 set -xeuo pipefail
-test -f /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so \
-  || { echo "FATAL: /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so missing (EFA NGC-mode plugin install failed)" >&2; exit 1; }
-ls -l /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so
-# OMPI5 mpirun sanity — must report "Open MPI" major 5.
-# AWS-bundled mpirun prints `mpirun (Open MPI) 5.0.9amzn1` so there is
-# a `)` between "MPI" and "5"; match with explicit close paren.
+test -x /opt/amazon/openmpi5/bin/mpirun
+# AWS-bundled mpirun prints `mpirun (Open MPI) 5.0.9amzn1` — match on the
+# close-paren + major to avoid matching other "MPI 5" substrings.
 /opt/amazon/${OMPI_DEFAULT}/bin/mpirun --version | grep -E "\(Open MPI\) 5\." >/dev/null \
   || { echo "FATAL: /opt/amazon/${OMPI_DEFAULT}/bin/mpirun did not report Open MPI 5.x" >&2; exit 1; }
+test -f /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so
+test -f /opt/amazon/pmix/lib/libpmix.so.2
+ls -l /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so /opt/amazon/pmix/lib/libpmix.so.2
 EOR
 
 ################################################################################
 # slurm-build — build SchedMD .debs from source against base-efa environment.
 #
 # Parent MUST be base-efa (NOT slurm-src): debian/rules configure flags need
-# libpmix from /opt/amazon/pmix (installed via base-efa's libpmix-aws deb)
-# and libnvidia-ml-dev from the CUDA parent image.
+# libpmix from /opt/amazon/pmix (installed via the EFA installer's libpmix-aws
+# deb) and NVML dev headers from cuda-nvml-dev-13-2 in base-cuda.
 #
 # Patches applied to the unpacked source tree before debuild:
-#   - debian/control:    adds libnvidia-ml-dev Build-Depends
-#   - debian/rules:      adds --with-nvml + --with-pmix=/opt/amazon/pmix
-#   - debian/changelog:  new entry ${SLURM_VERSION}-1${SLURM_DEB_PATCH_REV}
+#   - debian/control:    adds cuda-nvml-dev-13-2 Build-Depends; drops apt libpmix-dev.
+#   - debian/rules:      adds --with-nvml=/usr/local/cuda + --with-pmix=/opt/amazon/pmix.
+#   - debian/changelog:  new entry ${SLURM_VERSION}-1${SLURM_DEB_PATCH_REV}.
 FROM base-efa AS slurm-build
 
 SHELL ["bash", "-c"]
@@ -282,15 +272,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 set -xeuo pipefail
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends \
-  build-essential apt-utils fakeroot devscripts equivs patch \
-  libnvidia-ml-dev
+  apt-utils fakeroot devscripts equivs
 EOR
 
 COPY --from=slurm-src /workspace/${SLURM_DIR} ${SLURM_DIR}
 COPY patches/ /tmp/patches/
 
 RUN <<EOR
-# Apply SchedMD debian/ patches before build-dep resolution.
+# Apply debian/ patches before build-dep resolution so mk-build-deps sees
+# the patched debian/control.
 set -xeuo pipefail
 cd /tmp/${SLURM_DIR}
 for p in /tmp/patches/debian-control-nvml.patch \
@@ -316,16 +306,16 @@ EOR
 FROM slurm-build AS build
 
 ################################################################################
-# base-extra — Slinky extras MINUS openmpi apt (OMPI comes from /opt/amazon/openmpi5).
+# base-extra — IB userspace guest components on top of slurm-build.
 #
-# Upstream Slinky installs openmpi-bin/openmpi-common/libopenmpi-dev here; we
-# omit them because the EFA installer already provides OMPI5 at
-# /opt/amazon/openmpi5 and pulling a second OMPI tree from apt breaks
-# OPAL_PREFIX resolution at runtime. The PMIx client library previously
-# sourced from libpmix2 apt is supplied via libpmix-aws (/opt/amazon/pmix).
-# gawk / socat / authselect / sssd / openssh-server moved to the slurmd
-# target below, which is where they are actually used.
-FROM base-efa AS base-extra
+# Parent = slurm-build so the final slurmd image is a single linear chain and
+# the .debs are already present on FS (no cross-stage COPY needed). Upstream
+# Slinky installs openmpi-bin/openmpi-common/libopenmpi-dev here; we omit them
+# because the EFA installer already provides OMPI5 at /opt/amazon/openmpi5.
+# Pulling a second OMPI tree from apt would break OPAL_PREFIX resolution at
+# runtime. PMIx client lib previously sourced from libpmix2 is supplied via
+# the EFA-installer's PMIx tree under /opt/amazon/pmix.
+FROM slurm-build AS base-extra
 
 SHELL ["bash", "-c"]
 
@@ -333,7 +323,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
-# Mellanox OFED userspace repo (guest IB components only; kernel drivers from host).
+# Mellanox OFED userspace repo — guest IB components only; kernel drivers
+# are provided by the host.
 set -xeuo pipefail
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends \
@@ -348,21 +339,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
 apt-get -qq update
-# NOTE: do NOT install openmpi / openmpi-bin / libopenmpi-dev here — OMPI comes
-# from EFA installer at /opt/amazon/openmpi5. Adding apt openmpi re-introduces
-# a second OMPI tree and breaks OPAL_PREFIX resolution.
-# Install IB userspace guest components; rdma-core already partially pulled by EFA.
+# Auth/ops tools + IB userspace diagnostics. rdma-core was already installed
+# by the EFA installer in base-efa; apt will treat the apt version as
+# already-satisfied-or-newer.
 apt-get -qq -y install --no-install-recommends \
-  rdma-core \
+  openssh-server sssd sssd-ad sssd-ldap authselect libpam-sss libnss-sss \
+  gawk socat \
   infiniband-diags \
-  mlnx-ethtool \
   perftest
 EOR
 
 ################################################################################
 # gdrcopy-build — build gdrcopy userspace (libgdrapi) from source.
 # Ref: https://github.com/NVIDIA/gdrcopy
-FROM ${PARENT_IMAGE} AS gdrcopy-build
+FROM base-cuda AS gdrcopy-build
 
 SHELL ["bash", "-c"]
 
@@ -376,7 +366,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 set -xeuo pipefail
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends \
-  build-essential git check pkg-config debhelper dkms python3
+  git check debhelper dkms
 EOR
 
 RUN <<EOR
@@ -433,13 +423,13 @@ ENTRYPOINT ["entrypoint.sh"]
 #
 # Runtime env:
 #   PATH            prepend /opt/amazon/${OMPI_DEFAULT}/bin + /opt/amazon/efa/bin
-#   LD_LIBRARY_PATH prepend EFA + OMPI5 + ofi-nccl + CUDA
-#   OPAL_PREFIX     /opt/amazon/${OMPI_DEFAULT}  (required by OMPI so it finds
+#   LD_LIBRARY_PATH prepend EFA + OMPI5 + PMIx + ofi-nccl + CUDA
+#   OPAL_PREFIX     /opt/amazon/${OMPI_DEFAULT}  (OMPI requires this to find
 #                                                 its own prrte/libevent/etc.
 #                                                 outside /usr/{lib,share})
-#   FI_EFA_USE_DEVICE_RDMA=1        (p4/p5/p6 GPUDirect RDMA)
-#   FI_EFA_FORK_SAFE=1              (if app forks)
-#   NCCL_SOCKET_IFNAME=^docker,lo,veth  (exclude container virt interfaces)
+#   FI_EFA_USE_DEVICE_RDMA=1        p4/p5/p6 GPUDirect RDMA
+#   FI_EFA_FORK_SAFE=1              for fork-heavy apps
+#   NCCL_SOCKET_IFNAME=^docker,lo,veth  exclude container virt interfaces
 FROM base-extra AS slurmd
 
 SHELL ["bash", "-c"]
@@ -450,30 +440,25 @@ ARG OMPI_DEFAULT
 USER root
 WORKDIR /tmp/
 
-COPY --from=slurm-build /tmp/*.deb /tmp/*.ddeb /tmp/
-
-# Ref: https://slurm.schedmd.com/quickstart_admin.html#pkg_install
+# slurm-build .debs already live on FS via the base-efa -> slurm-build ->
+# base-extra chain; copy only the subset dpkg -i consumes into /tmp/.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends --fix-broken \
-  gawk socat \
-  openssh-server \
-  authselect sssd sssd-ad sssd-ldap libpam-sss libnss-sss \
-  ./slurm-smd-client_[0-9]*.deb \
-  ./slurm-smd-client-dbgsym_[0-9]*.ddeb \
-  ./slurm-smd-dev_[0-9]*.deb \
-  ./slurm-smd-doc_[0-9]*.deb \
-  ./slurm-smd-libnss-slurm_[0-9]*.deb \
-  ./slurm-smd-libnss-slurm-dbgsym_[0-9]*.ddeb \
-  ./slurm-smd-libpam-slurm-adopt_[0-9]*.deb \
-  ./slurm-smd-libpmi2-0_[0-9]*.deb \
-  ./slurm-smd-slurmd_[0-9]*.deb \
-  ./slurm-smd-slurmd-dbgsym_[0-9]*.ddeb \
-  ./slurm-smd_[0-9]*.deb \
-  ./slurm-smd-dbgsym_[0-9]*.ddeb
-rm *.deb && rm *.ddeb
+  /tmp/slurm-smd-client_[0-9]*.deb \
+  /tmp/slurm-smd-client-dbgsym_[0-9]*.ddeb \
+  /tmp/slurm-smd-dev_[0-9]*.deb \
+  /tmp/slurm-smd-doc_[0-9]*.deb \
+  /tmp/slurm-smd-libnss-slurm_[0-9]*.deb \
+  /tmp/slurm-smd-libnss-slurm-dbgsym_[0-9]*.ddeb \
+  /tmp/slurm-smd-libpam-slurm-adopt_[0-9]*.deb \
+  /tmp/slurm-smd-libpmi2-0_[0-9]*.deb \
+  /tmp/slurm-smd-slurmd_[0-9]*.deb \
+  /tmp/slurm-smd-slurmd-dbgsym_[0-9]*.ddeb \
+  /tmp/slurm-smd_[0-9]*.deb \
+  /tmp/slurm-smd-dbgsym_[0-9]*.ddeb
 mkdir -p /var/spool/slurmd/
 sed -i -E "s/^passwd:[[:space:]]+/&slurm /g" /etc/nsswitch.conf
 sed -i -E "s/^group:[[:space:]]+/&slurm /g" /etc/nsswitch.conf
@@ -497,7 +482,7 @@ COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/slurmd-entrypoint.sh /usr/local/bin/entrypoint.sh
 
 ENV PATH=/opt/amazon/${OMPI_DEFAULT}/bin:/opt/amazon/efa/bin:/usr/local/cuda/bin:${PATH}
-ENV LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/amazon/${OMPI_DEFAULT}/lib:/opt/amazon/pmix/lib:/opt/amazon/ofi-nccl/lib:/opt/amazon/ofi-nccl/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:/usr/local/lib
+ENV LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/amazon/${OMPI_DEFAULT}/lib:/opt/amazon/pmix/lib:/opt/amazon/ofi-nccl/lib:/usr/local/cuda/lib64:/usr/local/lib
 ENV OPAL_PREFIX=/opt/amazon/${OMPI_DEFAULT}
 ENV FI_EFA_USE_DEVICE_RDMA=1
 ENV FI_EFA_FORK_SAFE=1
@@ -577,8 +562,6 @@ WORKDIR /tmp/
 
 ADD https://dl.k8s.io/release/stable.txt kubernetes_stable.txt
 
-COPY --from=build /tmp/*.deb /tmp/*.ddeb /tmp/
-
 # Ref: https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/#install-using-native-package-management
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
@@ -598,20 +581,20 @@ rm *.txt
 EOR
 
 # Ref: https://slurm.schedmd.com/quickstart_admin.html#pkg_install
+# sackd .debs are already on FS via the base-extra -> slurm-build chain.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends --fix-broken \
   socat \
-  ./slurm-smd-client_[0-9]*.deb \
-  ./slurm-smd-client-dbgsym_[0-9]*.ddeb \
-  ./slurm-smd-doc_[0-9]*.deb \
-  ./slurm-smd-sackd_[0-9]*.deb \
-  ./slurm-smd-sackd-dbgsym_[0-9]*.ddeb \
-  ./slurm-smd_[0-9]*.deb \
-  ./slurm-smd-dbgsym_[0-9]*.ddeb
-rm *.deb && rm *.ddeb
+  /tmp/slurm-smd-client_[0-9]*.deb \
+  /tmp/slurm-smd-client-dbgsym_[0-9]*.ddeb \
+  /tmp/slurm-smd-doc_[0-9]*.deb \
+  /tmp/slurm-smd-sackd_[0-9]*.deb \
+  /tmp/slurm-smd-sackd-dbgsym_[0-9]*.ddeb \
+  /tmp/slurm-smd_[0-9]*.deb \
+  /tmp/slurm-smd-dbgsym_[0-9]*.ddeb
 mkdir -p /run/slurm/
 chown ${SLURM_USER}:${SLURM_USER} /run/slurm
 EOR
