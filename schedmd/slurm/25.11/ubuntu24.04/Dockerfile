@@ -568,7 +568,24 @@ COPY files/usr/local/bin/sackd-entrypoint.sh /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["entrypoint.sh"]
 
 ################################################################################
-FROM sackd AS login
+# login — researcher SSH entry node. Parent = slurmd so ENV block
+# (PATH/LD_LIBRARY_PATH/OPAL_PREFIX) + CUDA + EFA + OMPI5 + PMIx runtime are
+# inherited automatically; `mpicc`, `nvcc` resolve by name without duplicating
+# the ENV declarations here.
+#
+# Researcher auth at forles runs over Tailscale SSH (authorized_keys mounted
+# from k8s secret); no directory-service integration is required, so the
+# sssd / authselect / libpam-sss / libnss-sss stack is intentionally omitted
+# (never installed — not post-install removed).
+#
+# cmake is added for researcher compile workflows (CMake-based projects:
+# torch/CUDA extensions, C++ MPI apps, etc.).
+#
+# Slurm 25.11 client auth uses the sackd daemon, which is NOT part of the
+# slurmd stage's package set. Install slurm-smd-sackd here (deb still present
+# in /tmp from slurm-build chain; slurmd stage installed its subset without
+# a post-install `rm *.deb`) and ship the matching supervisor entry.
+FROM slurmd AS login
 
 SHELL ["bash", "-c"]
 
@@ -581,25 +598,39 @@ WORKDIR /tmp/
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
-apt-get -qq -y install --no-install-recommends \
+apt-get -qq -y install --no-install-recommends --fix-broken \
   socat \
-  openssh-server \
-  authselect sssd sssd-ad sssd-ldap libpam-sss libnss-sss
-mkdir -p /etc/authselect
-authselect select sssd with-mkhomedir --force
-rm -f /etc/ssh/ssh_host_*
+  cmake \
+  /tmp/slurm-smd-sackd_[0-9]*.deb \
+  /tmp/slurm-smd-sackd-dbgsym_[0-9]*.ddeb
+# sackd runs as the `slurm` user and writes its systemd-notify socket under
+# /run/slurm; create the directory with slurm ownership (mirrors the sackd
+# stage's runtime prep).
+mkdir -p /run/slurm/
+chown slurm:slurm /run/slurm
 EOR
 
 COPY --from=gdrcopy-build /usr/local/lib/libgdrapi* /usr/local/lib/
 COPY --from=gdrcopy-build /usr/local/include/gdr* /usr/local/include/
 RUN ldconfig
 
+# Supervisor layout: slurmd's fakesystemd.conf runs fakesystemd as root, but
+# sackd runs as the slurm user and shares the same NOTIFY_SOCKET path, so the
+# socket must be owned by slurm. Swap to the fakesystemd-slurm.conf variant
+# (identical program definition plus `user=slurm`). Removing the inherited
+# file first avoids two supervisor entries both named [program:fakesystemd].
+# Also drop slurmd's slurmd.conf supervisor entry — login does not run the
+# compute daemon, it runs sackd + sshd.
+RUN <<EOR
+set -xeuo pipefail
+rm /etc/supervisor/conf.d/fakesystemd.conf
+rm /etc/supervisor/conf.d/slurmd.conf
+EOR
+
 COPY files/etc/supervisor/supervisord.conf /etc/supervisor/
 COPY \
   files/etc/supervisor/conf.d/fakesystemd-slurm.conf \
   files/etc/supervisor/conf.d/sackd.conf \
-  files/etc/supervisor/conf.d/sshd.conf \
-  files/etc/supervisor/conf.d/sssd.conf \
   /etc/supervisor/conf.d/
 COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/login-entrypoint.sh /usr/local/bin/entrypoint.sh
