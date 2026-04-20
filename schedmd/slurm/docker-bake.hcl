@@ -16,7 +16,7 @@ variable "SUFFIX" {}
 # --set slurmd-cuda-efa.args.* must keep the two in sync.
 
 variable "CUDA_BASE_TAG"          { default = "13.2.1-devel-ubuntu24.04" }
-variable "SLURM_VERSION_CUDA_EFA" { default = "25.11.0" }
+variable "SLURM_VERSION_CUDA_EFA" { default = "25.11.5" }
 variable "SLURM_DEB_PATCH_REV"    { default = "meshy1" }
 variable "EFA_INSTALLER_VERSION"  { default = "1.48.0" }
 variable "EFA_INSTALLER_FLAGS"    { default = "-y -g -d --skip-kmod --skip-limit-conf --no-verify" }

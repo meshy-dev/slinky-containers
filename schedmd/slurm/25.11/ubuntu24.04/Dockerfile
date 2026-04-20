@@ -6,7 +6,7 @@
 # Build args — contract per plan docs/plans/2026-04-19T233208Z-meshy-slinky-slurmd-efa-cuda13.md §3
 #
 # CUDA_BASE_TAG          NVIDIA CUDA devel image tag (consumed via PARENT_IMAGE)
-# SLURM_VERSION          Upstream SchedMD slurm source version (e.g. 25.11.0)
+# SLURM_VERSION          Upstream SchedMD slurm source version (e.g. 25.11.5)
 # SLURM_DEB_PATCH_REV    Local .deb patch revision stamped into debian/changelog
 # EFA_INSTALLER_VERSION  aws-efa-installer release version
 # EFA_INSTALLER_FLAGS    Flags passed to ./efa_installer.sh (MUST NOT include --skip-mpi)
@@ -17,7 +17,7 @@
 ################################################################################
 
 ARG CUDA_BASE_TAG=13.2.1-devel-ubuntu24.04
-ARG SLURM_VERSION=25.11.0
+ARG SLURM_VERSION=25.11.5
 ARG SLURM_VERSION_MICRO=1
 ARG SLURM_DEB_PATCH_REV=meshy1
 ARG EFA_INSTALLER_VERSION=1.48.0
