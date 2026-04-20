@@ -291,41 +291,6 @@ EOR
 FROM slurm-build AS build
 
 ################################################################################
-# base-extra — IB userspace guest components on top of slurm-build.
-#
-# Parent = slurm-build so the final slurmd image is a single linear chain and
-# the .debs are already present on FS (no cross-stage COPY needed). Upstream
-# Slinky installs openmpi-bin/openmpi-common/libopenmpi-dev here; we omit them
-# because the EFA installer already provides OMPI5 at /opt/amazon/openmpi5.
-# Pulling a second OMPI tree from apt would break OPAL_PREFIX resolution at
-# runtime. PMIx client lib previously sourced from libpmix2 is supplied via
-# the EFA-installer's PMIx tree under /opt/amazon/pmix.
-FROM slurm-build AS base-extra
-
-SHELL ["bash", "-c"]
-
-ARG DEBIAN_FRONTEND=noninteractive
-
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-  --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
-# Mellanox OFED userspace repo — guest IB components only; kernel drivers
-# are provided by the host.
-set -xeuo pipefail
-curl -fsSL https://linux.mellanox.com/public/repo/mlnx_ofed/latest/ubuntu24.04/mellanox_mlnx_ofed.list | tee /etc/apt/sources.list.d/mellanox-mlnx-ofed.list
-wget -qO - https://www.mellanox.com/downloads/ofed/RPM-GPG-KEY-Mellanox | apt-key add -
-chmod 644 /etc/apt/sources.list.d/mellanox-mlnx-ofed.list
-apt-get -qq update
-# Auth/ops tools + IB userspace diagnostics. rdma-core was already installed
-# by the EFA installer in base-efa; apt will treat the apt version as
-# already-satisfied-or-newer.
-apt-get -qq -y install --no-install-recommends \
-  openssh-server sssd sssd-ad sssd-ldap authselect libpam-sss libnss-sss \
-  gawk socat \
-  infiniband-diags \
-  perftest
-EOR
-
-################################################################################
 # gdrcopy-build — build gdrcopy userspace (libgdrapi) from source.
 # Ref: https://github.com/NVIDIA/gdrcopy
 FROM base-cuda AS gdrcopy-build
@@ -404,7 +369,14 @@ ENTRYPOINT ["entrypoint.sh"]
 #   FI_EFA_USE_DEVICE_RDMA=1        p4/p5/p6 GPUDirect RDMA
 #   FI_EFA_FORK_SAFE=1              for fork-heavy apps
 #   NCCL_SOCKET_IFNAME=^docker,lo,veth  exclude container virt interfaces
-FROM base-extra AS slurmd
+#
+# Parent = slurm-build: direct chain, no IB/OFED auth-scaffold intermediate.
+# The forles pod spec runs sshd inside this container (on a non-22 port via
+# SSHD_OPTIONS) and mounts authorized_keys from a k8s secret, so only
+# openssh-server is installed here — no sssd/authselect/libpam-sss/libnss-sss
+# (LDAP/AD integration for on-prem clusters) since auth is munge + the
+# k8s-mounted authorized_keys.
+FROM slurm-build AS slurmd
 
 SHELL ["bash", "-c"]
 
@@ -414,12 +386,15 @@ ARG OMPI_DEFAULT
 USER root
 WORKDIR /tmp/
 
-# slurm-build .debs already live on FS via the base-efa -> slurm-build ->
-# base-extra chain; copy only the subset dpkg -i consumes into /tmp/.
+# slurm-build .debs already live on FS via the base-efa -> slurm-build chain;
+# install only the subset dpkg consumes here. openssh-server is the only
+# non-slurm runtime dependency the forles slurmd pod needs (sshd binds the
+# pod's ssh port so operators can `kubectl exec`-free exec into compute nodes).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
 apt-get -qq -y install --no-install-recommends --fix-broken \
+  openssh-server \
   /tmp/slurm-smd-client_[0-9]*.deb \
   /tmp/slurm-smd-client-dbgsym_[0-9]*.ddeb \
   /tmp/slurm-smd-dev_[0-9]*.deb \
@@ -433,10 +408,12 @@ apt-get -qq -y install --no-install-recommends --fix-broken \
   /tmp/slurm-smd_[0-9]*.deb \
   /tmp/slurm-smd-dbgsym_[0-9]*.ddeb
 mkdir -p /var/spool/slurmd/
+# slurm-smd-libnss-slurm provides a 'slurm' NSS module; prepend it to
+# passwd/group lookups so slurm-adopted PAM sessions can resolve job users.
 sed -i -E "s/^passwd:[[:space:]]+/&slurm /g" /etc/nsswitch.conf
 sed -i -E "s/^group:[[:space:]]+/&slurm /g" /etc/nsswitch.conf
-mkdir -p /etc/authselect
-authselect select sssd with-mkhomedir --force
+# Remove distro-default host keys; pod-level init regenerates fresh keys
+# (or mounts them from a secret) on first boot.
 rm -f /etc/ssh/ssh_host_*
 EOR
 
@@ -449,7 +426,6 @@ COPY \
   files/etc/supervisor/conf.d/fakesystemd.conf \
   files/etc/supervisor/conf.d/slurmd.conf \
   files/etc/supervisor/conf.d/sshd.conf \
-  files/etc/supervisor/conf.d/sssd.conf \
   /etc/supervisor/conf.d/
 COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/slurmd-entrypoint.sh /usr/local/bin/entrypoint.sh
@@ -522,7 +498,7 @@ ENTRYPOINT ["tini", "-g", "--", "slurmrestd"]
 CMD ["0.0.0.0:6820"]
 
 ################################################################################
-FROM base-extra AS sackd
+FROM slurm-build AS sackd
 
 SHELL ["bash", "-c"]
 
@@ -535,7 +511,7 @@ ADD https://dl.k8s.io/release/stable.txt kubernetes_stable.txt
 
 # Ref: https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/#install-using-native-package-management
 # Ref: https://slurm.schedmd.com/quickstart_admin.html#pkg_install
-# sackd .debs are already on FS via the base-extra -> slurm-build chain.
+# sackd .debs are already on FS via the base-efa -> slurm-build chain.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
