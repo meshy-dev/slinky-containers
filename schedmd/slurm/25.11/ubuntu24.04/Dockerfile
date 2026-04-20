@@ -257,8 +257,10 @@ else
   find /opt/amazon/ofi-nccl -name 'libnccl-*' >&2 || true
   exit 1
 fi
-# OMPI5 mpirun sanity — must report "Open MPI 5."
-/opt/amazon/${OMPI_DEFAULT}/bin/mpirun --version | grep -E "Open MPI 5\." >/dev/null
+# OMPI5 mpirun sanity — must report "Open MPI" major 5.
+# AWS-bundled mpirun prints `mpirun (Open MPI) 5.0.9amzn1` so there is
+# a `)` between "MPI" and "5"; match with explicit close paren.
+/opt/amazon/${OMPI_DEFAULT}/bin/mpirun --version | grep -E "\(Open MPI\) 5\." >/dev/null
 EOR
 
 ################################################################################
