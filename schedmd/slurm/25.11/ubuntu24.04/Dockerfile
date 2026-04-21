@@ -456,6 +456,22 @@ ENV FI_EFA_USE_DEVICE_RDMA=1
 ENV FI_EFA_FORK_SAFE=1
 ENV NCCL_SOCKET_IFNAME=^docker,lo,veth
 
+# SSH login shells do not automatically inherit Docker ENV declarations;
+# ensure profile.d exports match the ENV block above so interactive sessions
+# (e.g. `ssh login` or `kubectl exec` into slurmd) resolve mpirun, nvcc, etc.
+RUN <<EOR
+set -xeuo pipefail
+cat > /etc/profile.d/amazon-efa-ompi5.sh <<PROFILE
+export PATH=/opt/amazon/${OMPI_DEFAULT}/bin:/opt/amazon/efa/bin:/usr/local/cuda/bin:\${PATH}
+export LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/amazon/${OMPI_DEFAULT}/lib:/opt/amazon/pmix/lib:/opt/amazon/ofi-nccl/lib:/usr/local/cuda/lib64:/usr/local/lib
+export OPAL_PREFIX=/opt/amazon/${OMPI_DEFAULT}
+export FI_EFA_USE_DEVICE_RDMA=1
+export FI_EFA_FORK_SAFE=1
+export NCCL_SOCKET_IFNAME=^docker,lo,veth
+PROFILE
+chmod 644 /etc/profile.d/amazon-efa-ompi5.sh
+EOR
+
 EXPOSE 6818/tcp 22/tcp
 ENTRYPOINT ["entrypoint.sh"]
 
