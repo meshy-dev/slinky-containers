@@ -454,7 +454,6 @@ ENV LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/amazon/${OMPI_DEFAULT}/lib:/opt/ama
 ENV OPAL_PREFIX=/opt/amazon/${OMPI_DEFAULT}
 ENV FI_EFA_USE_DEVICE_RDMA=1
 ENV FI_EFA_FORK_SAFE=1
-ENV NCCL_SOCKET_IFNAME=^docker,lo,veth
 
 # SSH login shells do not automatically inherit Docker ENV declarations;
 # ensure profile.d exports match the ENV block above so interactive sessions
@@ -467,9 +466,12 @@ export LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/amazon/${OMPI_DEFAULT}/lib:/opt/
 export OPAL_PREFIX=/opt/amazon/${OMPI_DEFAULT}
 export FI_EFA_USE_DEVICE_RDMA=1
 export FI_EFA_FORK_SAFE=1
-export NCCL_SOCKET_IFNAME=^docker,lo,veth
 PROFILE
 chmod 644 /etc/profile.d/amazon-efa-ompi5.sh
+cat > /etc/nccl.conf <<'EOF'
+NCCL_SOCKET_IFNAME=^docker,lo,veth
+EOF
+chmod 644 /etc/nccl.conf
 EOR
 
 EXPOSE 6818/tcp 22/tcp
