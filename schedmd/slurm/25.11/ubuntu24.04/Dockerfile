@@ -108,7 +108,7 @@ apt-get -qq -y upgrade
 apt-get -qq -y install --no-install-recommends \
   ca-certificates curl gnupg wget tini gosu \
   supervisor \
-  procps iputils-ping ncurses-bin \
+  procps iputils-ping ncurses-bin socat \
   vim less sudo unzip git \
   build-essential pkg-config patch \
   python3 python3-pip \
