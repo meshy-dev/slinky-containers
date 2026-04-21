@@ -47,5 +47,5 @@ jobs:
           docker buildx bake \
             -f docker-bake.hcl \
             -f 25.11/ubuntu24.04/slurm.hcl \
-            slurmd-cuda-efa \
+            slurmd-cuda-efa login \
             --push
