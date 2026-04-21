@@ -586,24 +586,75 @@ COPY files/usr/local/bin/sackd-entrypoint.sh /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["entrypoint.sh"]
 
 ################################################################################
-# login — researcher SSH entry node. Parent = slurmd so ENV block
-# (PATH/LD_LIBRARY_PATH/OPAL_PREFIX) + CUDA + EFA + OMPI5 + PMIx runtime are
-# inherited automatically; `mpicc`, `nvcc` resolve by name without duplicating
-# the ENV declarations here.
-#
-# Researcher auth at forles runs over Tailscale SSH (authorized_keys mounted
-# from k8s secret); no directory-service integration is required, so the
-# sssd / authselect / libpam-sss / libnss-sss stack is intentionally omitted
-# (never installed — not post-install removed).
-#
-# cmake is added for researcher compile workflows (CMake-based projects:
-# torch/CUDA extensions, C++ MPI apps, etc.).
-#
-# Slurm 25.11 client auth uses the sackd daemon, which is NOT part of the
-# slurmd stage's package set. Install slurm-smd-sackd here (deb still present
-# in /tmp from slurm-build chain; slurmd stage installed its subset without
-# a post-install `rm *.deb`) and ship the matching supervisor entry.
+# login — researcher SSH entry node. Rebuilt on slurmd base so it inherits
+# CUDA + EFA + OMPI5 + PMIx runtime ENV (PATH/LD_LIBRARY_PATH/OPAL_PREFIX).
+# All steps from upstream sackd stage are replicated verbatim, followed by all
+# steps from upstream login stage verbatim.
+# ── login ─────────────────────────────────────────────────────────────────────
 FROM slurmd AS login
+
+SHELL ["bash", "-c"]
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+USER root
+WORKDIR /tmp/
+
+# --- replicated from upstream sackd stage (verbatim, minus the FROM line) ---
+
+ADD https://dl.k8s.io/release/stable.txt kubernetes_stable.txt
+
+# Ref: https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/#install-using-native-package-management
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
+# Install kubectl
+set -xeuo pipefail
+apt-get -qq update
+VERSION="$(cat kubernetes_stable.txt | grep -Eo '^v[0-9]+\.[0-9]+')"
+apt-get -qq -y install --no-install-recommends \
+  apt-transport-https ca-certificates curl gnupg
+mkdir -p -m 755 /etc/apt/keyrings
+curl -fsSL https://pkgs.k8s.io/core:/stable:/${VERSION}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+chmod 644 /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${VERSION}/deb/ /" | tee /etc/apt/sources.list.d/kubernetes.list
+chmod 644 /etc/apt/sources.list.d/kubernetes.list
+apt-get -qq update
+apt-get -qq -y install --no-install-recommends kubectl
+rm *.txt
+EOR
+
+# Ref: https://slurm.schedmd.com/quickstart_admin.html#pkg_install
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
+# Install Slurm Packages
+set -xeuo pipefail
+apt-get -qq update
+apt-get -qq -y install --no-install-recommends --fix-broken \
+  socat \
+  /tmp/slurm-smd-client_[0-9]*.deb \
+  /tmp/slurm-smd-client-dbgsym_[0-9]*.ddeb \
+  /tmp/slurm-smd-doc_[0-9]*.deb \
+  /tmp/slurm-smd-sackd_[0-9]*.deb \
+  /tmp/slurm-smd-sackd-dbgsym_[0-9]*.ddeb \
+  /tmp/slurm-smd_[0-9]*.deb \
+  /tmp/slurm-smd-dbgsym_[0-9]*.ddeb
+rm *.deb && rm *.ddeb
+# Prepare Directories
+mkdir -p /run/slurm/
+chown ${SLURM_USER}:${SLURM_USER} /run/slurm
+EOR
+
+COPY files/etc/supervisor/supervisord.conf /etc/supervisor/
+COPY \
+  files/etc/supervisor/conf.d/sackd.conf \
+  files/etc/supervisor/conf.d/fakesystemd-slurm.conf \
+  /etc/supervisor/conf.d/
+COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
+COPY files/usr/local/bin/sackd-entrypoint.sh /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["entrypoint.sh"]
+
+# --- replicated from upstream login stage (verbatim, minus the FROM line) ---
 
 SHELL ["bash", "-c"]
 
@@ -615,40 +666,25 @@ WORKDIR /tmp/
 # Ref: https://slurm.schedmd.com/quickstart_admin.html#pkg_install
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
+# Install Packages
 set -xeuo pipefail
-apt-get -qq -y install --no-install-recommends --fix-broken \
+apt-get -qq update
+apt-get -qq -y install --no-install-recommends \
   socat \
-  cmake \
-  /tmp/slurm-smd-sackd_[0-9]*.deb \
-  /tmp/slurm-smd-sackd-dbgsym_[0-9]*.ddeb
-# sackd runs as the `slurm` user and writes its systemd-notify socket under
-# /run/slurm; create the directory with slurm ownership (mirrors the sackd
-# stage's runtime prep).
-mkdir -p /run/slurm/
-chown slurm:slurm /run/slurm
-EOR
-
-COPY --from=gdrcopy-build /usr/local/lib/libgdrapi* /usr/local/lib/
-COPY --from=gdrcopy-build /usr/local/include/gdr* /usr/local/include/
-RUN ldconfig
-
-# Supervisor layout: slurmd's fakesystemd.conf runs fakesystemd as root, but
-# sackd runs as the slurm user and shares the same NOTIFY_SOCKET path, so the
-# socket must be owned by slurm. Swap to the fakesystemd-slurm.conf variant
-# (identical program definition plus `user=slurm`). Removing the inherited
-# file first avoids two supervisor entries both named [program:fakesystemd].
-# Also drop slurmd's slurmd.conf supervisor entry — login does not run the
-# compute daemon, it runs sackd + sshd.
-RUN <<EOR
-set -xeuo pipefail
-rm /etc/supervisor/conf.d/fakesystemd.conf
-rm /etc/supervisor/conf.d/slurmd.conf
+  openssh-server \
+  authselect sssd sssd-ad sssd-ldap libpam-sss libnss-sss
+# Configure
+mkdir -p /etc/authselect
+authselect select sssd with-mkhomedir --force
+rm -f /etc/ssh/ssh_host_*
 EOR
 
 COPY files/etc/supervisor/supervisord.conf /etc/supervisor/
 COPY \
   files/etc/supervisor/conf.d/fakesystemd-slurm.conf \
   files/etc/supervisor/conf.d/sackd.conf \
+  files/etc/supervisor/conf.d/sshd.conf \
+  files/etc/supervisor/conf.d/sssd.conf \
   /etc/supervisor/conf.d/
 COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/login-entrypoint.sh /usr/local/bin/entrypoint.sh
