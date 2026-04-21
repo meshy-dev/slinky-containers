@@ -108,7 +108,7 @@ apt-get -qq -y upgrade
 apt-get -qq -y install --no-install-recommends \
   ca-certificates curl gnupg wget tini gosu \
   supervisor \
-  procps iputils-ping ncurses-bin socat \
+  procps iputils-ping ncurses-bin socat mosh \
   vim less sudo unzip git \
   build-essential pkg-config patch \
   python3 python3-pip \
@@ -600,6 +600,9 @@ ARG DEBIAN_FRONTEND=noninteractive
 USER root
 WORKDIR /tmp/
 
+RUN rm /etc/supervisor/conf.d/slurmd.conf \
+    && rm /etc/supervisor/conf.d/fakesystemd.conf
+
 # --- replicated from upstream sackd stage (verbatim, minus the FROM line) ---
 
 ADD https://dl.k8s.io/release/stable.txt kubernetes_stable.txt
@@ -630,38 +633,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 set -xeuo pipefail
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends --fix-broken \
-  socat \
-  /tmp/slurm-smd-client_[0-9]*.deb \
-  /tmp/slurm-smd-client-dbgsym_[0-9]*.ddeb \
-  /tmp/slurm-smd-doc_[0-9]*.deb \
   /tmp/slurm-smd-sackd_[0-9]*.deb \
-  /tmp/slurm-smd-sackd-dbgsym_[0-9]*.ddeb \
-  /tmp/slurm-smd_[0-9]*.deb \
-  /tmp/slurm-smd-dbgsym_[0-9]*.ddeb
+  /tmp/slurm-smd-sackd-dbgsym_[0-9]*.ddeb
 rm *.deb && rm *.ddeb
 # Prepare Directories
 mkdir -p /run/slurm/
 chown ${SLURM_USER}:${SLURM_USER} /run/slurm
 EOR
 
-COPY files/etc/supervisor/supervisord.conf /etc/supervisor/
-COPY \
-  files/etc/supervisor/conf.d/sackd.conf \
-  files/etc/supervisor/conf.d/fakesystemd-slurm.conf \
-  /etc/supervisor/conf.d/
-COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
-COPY files/usr/local/bin/sackd-entrypoint.sh /usr/local/bin/entrypoint.sh
-
-ENTRYPOINT ["entrypoint.sh"]
-
 # --- replicated from upstream login stage (verbatim, minus the FROM line) ---
-
-SHELL ["bash", "-c"]
-
-ARG DEBIAN_FRONTEND=noninteractive
-
-USER root
-WORKDIR /tmp/
 
 # Ref: https://slurm.schedmd.com/quickstart_admin.html#pkg_install
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -670,8 +650,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 set -xeuo pipefail
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends \
-  socat \
-  openssh-server \
   authselect sssd sssd-ad sssd-ldap libpam-sss libnss-sss
 # Configure
 mkdir -p /etc/authselect
@@ -679,14 +657,12 @@ authselect select sssd with-mkhomedir --force
 rm -f /etc/ssh/ssh_host_*
 EOR
 
-COPY files/etc/supervisor/supervisord.conf /etc/supervisor/
 COPY \
   files/etc/supervisor/conf.d/fakesystemd-slurm.conf \
   files/etc/supervisor/conf.d/sackd.conf \
   files/etc/supervisor/conf.d/sshd.conf \
   files/etc/supervisor/conf.d/sssd.conf \
   /etc/supervisor/conf.d/
-COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/login-entrypoint.sh /usr/local/bin/entrypoint.sh
 
 EXPOSE 22/tcp
