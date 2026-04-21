@@ -603,6 +603,10 @@ WORKDIR /tmp/
 RUN rm /etc/supervisor/conf.d/slurmd.conf \
     && rm /etc/supervisor/conf.d/fakesystemd.conf
 
+ENV NVIDIA_VISIBLE_DEVICES=void
+ENV NVIDIA_DRIVER_CAPABILITIES=
+ENV NVIDIA_REQUIRE_CUDA=
+
 # --- replicated from upstream sackd stage (verbatim, minus the FROM line) ---
 
 ADD https://dl.k8s.io/release/stable.txt kubernetes_stable.txt
@@ -650,7 +654,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 set -xeuo pipefail
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends \
-  authselect sssd sssd-ad sssd-ldap libpam-sss libnss-sss
+  authselect sssd sssd-ad sssd-ldap libpam-sss libnss-sss cmake
 # Configure
 mkdir -p /etc/authselect
 authselect select sssd with-mkhomedir --force
