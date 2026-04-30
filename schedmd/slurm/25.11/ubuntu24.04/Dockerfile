@@ -385,9 +385,12 @@ ENTRYPOINT ["entrypoint.sh"]
 #   OPAL_PREFIX     /opt/amazon/${OMPI_DEFAULT}  (OMPI requires this to find
 #                                                 its own prrte/libevent/etc.
 #                                                 outside /usr/{lib,share})
-#   FI_EFA_USE_DEVICE_RDMA=1        p4/p5/p6 GPUDirect RDMA
-#   FI_EFA_FORK_SAFE=1              for fork-heavy apps
 #   NCCL_SOCKET_IFNAME=^docker,lo,veth  exclude container virt interfaces
+# Deliberately NOT set: FI_EFA_USE_DEVICE_RDMA (default ON for p4/p5/p6 in
+# aws-ofi-nccl ≥1.7) and FI_EFA_FORK_SAFE (harmful on Linux ≥5.15 — kernel
+# handles MADV_DONTFORK and FORK_SAFE forces COW penalties on PyTorch
+# DataLoader / fork-heavy paths).
+# Refs: https://github.com/aws/aws-ofi-nccl/blob/master/doc/efa-env-var.md
 #
 # Parent = slurm-build: direct chain, no IB/OFED auth-scaffold intermediate.
 # The forles pod spec runs sshd inside this container (on a non-22 port via
@@ -452,8 +455,6 @@ COPY files/usr/local/bin/slurmd-entrypoint.sh /usr/local/bin/entrypoint.sh
 ENV PATH=/opt/amazon/${OMPI_DEFAULT}/bin:/opt/amazon/efa/bin:/usr/local/cuda/bin:${PATH}
 ENV LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/amazon/${OMPI_DEFAULT}/lib:/opt/amazon/pmix/lib:/opt/amazon/ofi-nccl/lib:/usr/local/cuda/lib64:/usr/local/lib
 ENV OPAL_PREFIX=/opt/amazon/${OMPI_DEFAULT}
-ENV FI_EFA_USE_DEVICE_RDMA=1
-ENV FI_EFA_FORK_SAFE=1
 
 # SSH login shells do not automatically inherit Docker ENV declarations;
 # ensure profile.d exports match the ENV block above so interactive sessions
@@ -464,8 +465,6 @@ cat > /etc/profile.d/amazon-efa-ompi5.sh <<PROFILE
 export PATH=/opt/amazon/${OMPI_DEFAULT}/bin:/opt/amazon/efa/bin:/usr/local/cuda/bin:\${PATH}
 export LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/amazon/${OMPI_DEFAULT}/lib:/opt/amazon/pmix/lib:/opt/amazon/ofi-nccl/lib:/usr/local/cuda/lib64:/usr/local/lib
 export OPAL_PREFIX=/opt/amazon/${OMPI_DEFAULT}
-export FI_EFA_USE_DEVICE_RDMA=1
-export FI_EFA_FORK_SAFE=1
 PROFILE
 chmod 644 /etc/profile.d/amazon-efa-ompi5.sh
 cat > /etc/nccl.conf <<'EOF'
