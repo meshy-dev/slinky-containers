@@ -32,6 +32,8 @@ ARG OMPI_DEFAULT=openmpi5
 ARG NCCL_CUDA_SUFFIX=cuda13.2
 ARG NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100"
 ARG SLURM_DIR=slurm
+ARG FABRIC=ib
+ARG FABRIC_BASE=base-${FABRIC}
 
 ################################################################################
 # slurm-src — alpine sidecar: fetch + extract SchedMD slurm source tarball.
@@ -174,6 +176,7 @@ ENV PATH=/usr/local/cuda/bin:${PATH}
 
 ################################################################################
 # base-efa — AWS EFA installer: libfabric-aws + OMPI5 + aws-ofi-nccl.
+# Fabric: efa
 #
 # Plain ubuntu:24.04 has no /opt/nvidia/nvidia_entrypoint.sh marker, so the
 # EFA installer runs in normal (non-NGC) mode: it installs its own bundled
@@ -247,17 +250,73 @@ ldconfig -p | grep -q 'libpmix\.so\.2 ' || { echo "FATAL: libpmix.so.2 not resol
 EOR
 
 ################################################################################
-# slurm-build — build SchedMD .debs from source against base-efa environment.
+# base-ib — DOCA userland IB verbs + Open MPI + system PMIx.
 #
-# Parent MUST be base-efa (NOT slurm-src): debian/rules configure flags need
-# libpmix from /opt/amazon/pmix (installed via the EFA installer's libpmix-aws
-# deb) and NVML dev headers from cuda-nvml-dev-13-2 in base-cuda.
+# Installs only guest/userland components (no kmod, no metapackage bloat).
+# Open MPI comes from DOCA repo (currently 4.1.x). PMIx comes from Ubuntu
+# because DOCA repo does not ship PMIx debs.
+FROM base-cuda AS base-ib
+
+SHELL ["bash", "-c"]
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
+set -xeuo pipefail
+mkdir -p -m 755 /etc/apt/keyrings
+curl -fsSL https://linux.mellanox.com/public/repo/doca/latest/ubuntu24.04/x86_64/GPG-KEY-Mellanox.pub | gpg --dearmor -o /etc/apt/keyrings/doca.gpg
+chmod 644 /etc/apt/keyrings/doca.gpg
+echo "deb [signed-by=/etc/apt/keyrings/doca.gpg arch=amd64] https://linux.mellanox.com/public/repo/doca/latest/ubuntu24.04/x86_64/ /" | tee /etc/apt/sources.list.d/doca.list
+chmod 644 /etc/apt/sources.list.d/doca.list
+apt-get -qq update
+apt-get -qq -y install --no-install-recommends \
+  rdma-core \
+  ibverbs-providers \
+  ibverbs-utils \
+  libibverbs1 \
+  libibverbs-dev \
+  librdmacm1 \
+  librdmacm-dev \
+  infiniband-diags \
+  openmpi \
+  libpmix-dev \
+  libpmix2t64
+# DOCA openmpi installs under /usr/mpi/gcc/openmpi-*/ but does not create
+# /usr/bin symlinks. Expose a version-agnostic MPI_HOME and put mpirun on
+# PATH so the post-install gate and downstream slurmd stage resolve it.
+OMPI_DIR=$(ls -d /usr/mpi/gcc/openmpi-* | head -1)
+ln -sfn "${OMPI_DIR}" /usr/mpi/gcc/openmpi
+for b in mpirun mpiexec mpicc mpicxx; do
+  [ -e "/usr/mpi/gcc/openmpi/bin/${b}" ] && ln -sf "/usr/mpi/gcc/openmpi/bin/${b}" "/usr/bin/${b}" || true
+done
+ldconfig
+EOR
+
+# Post-install verification gates — mirror EFA fail-fast style.
+RUN <<EOR
+set -xeuo pipefail
+test -x /usr/bin/mpirun
+/usr/bin/mpirun --version | grep -E "\(Open MPI\) [45]\." >/dev/null \
+  || { echo "FATAL: /usr/bin/mpirun did not report Open MPI 4.x/5.x" >&2; exit 1; }
+ldconfig
+ldconfig -p | grep -q 'libpmix\.so\.2 ' || { echo "FATAL: libpmix.so.2 not resolvable via ldconfig" >&2; exit 1; }
+# ibv_devinfo fails when no IB device exists (expected in CI build), so treat as non-fatal.
+ibv_devinfo >/dev/null 2>&1 || echo "WARN: ibv_devinfo failed (no RDMA device during build, expected)" >&2
+true
+EOR
+
+################################################################################
+# slurm-build — build SchedMD .debs from source against parameterized fabric
+# environment.
 #
-# Patches applied to the unpacked source tree before debuild:
-#   - debian/control:    adds cuda-nvml-dev-13-2 Build-Depends; drops apt libpmix-dev.
-#   - debian/rules:      adds --with-nvml=/usr/local/cuda + --with-pmix=/opt/amazon/pmix.
-#   - debian/changelog:  new entry ${SLURM_VERSION}-1${SLURM_DEB_PATCH_REV}.
-FROM base-efa AS slurm-build
+# Parent is selected via FABRIC_BASE (base-efa or base-ib). Patches are applied
+# from patches/common/ then patches/${FABRIC}/ so EFA and IB paths receive the
+# correct debian/control and debian/rules hunks (e.g., EFA drops apt libpmix-dev
+# and points to /opt/amazon/pmix; IB keeps apt libpmix-dev for system PMIx).
+ARG FABRIC=ib
+ARG FABRIC_BASE=base-${FABRIC}
+FROM ${FABRIC_BASE} AS slurm-build
 
 SHELL ["bash", "-c"]
 
@@ -265,6 +324,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG SLURM_VERSION
 ARG SLURM_DIR
 ARG SLURM_DEB_PATCH_REV
+ARG FABRIC=ib
 ENV SLURM_VERSION=${SLURM_VERSION}
 ENV SLURM_DEB_PATCH_REV=${SLURM_DEB_PATCH_REV}
 
@@ -287,9 +347,12 @@ RUN <<EOR
 # the patched debian/control.
 set -xeuo pipefail
 cd /tmp/${SLURM_DIR}
-for p in /tmp/patches/debian-control-nvml.patch \
-         /tmp/patches/debian-rules-nvml-pmix.patch \
-         /tmp/patches/debian-changelog-meshy.patch; do
+for p in /tmp/patches/common/*.patch; do
+  [ -e "$p" ] || continue
+  patch -p1 < "$p"
+done
+for p in /tmp/patches/${FABRIC}/*.patch; do
+  [ -e "$p" ] || continue
   patch -p1 < "$p"
 done
 EOR
@@ -403,12 +466,18 @@ FROM slurm-build AS slurmd
 SHELL ["bash", "-c"]
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG OMPI_DEFAULT
+ARG FABRIC=ib
+
+ARG MPI_HOME=/opt/amazon/openmpi5
+ARG EFA_HOME=/opt/amazon/efa
+ARG PMIX_HOME=/opt/amazon/pmix
+ARG OFI_HOME=/opt/amazon/efa
+ARG OPAL_PREFIX=/opt/amazon/openmpi5
 
 USER root
 WORKDIR /tmp/
 
-# slurm-build .debs already live on FS via the base-efa -> slurm-build chain;
+# slurm-build .debs already live on FS via the fabric base -> slurm-build chain;
 # install only the subset dpkg consumes here. openssh-server is the only
 # non-slurm runtime dependency the forles slurmd pod needs (sshd binds the
 # pod's ssh port so operators can `kubectl exec`-free exec into compute nodes).
@@ -452,21 +521,23 @@ COPY \
 COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/slurmd-entrypoint.sh /usr/local/bin/entrypoint.sh
 
-ENV PATH=/opt/amazon/${OMPI_DEFAULT}/bin:/opt/amazon/efa/bin:/usr/local/cuda/bin:${PATH}
-ENV LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/amazon/${OMPI_DEFAULT}/lib:/opt/amazon/pmix/lib:/opt/amazon/ofi-nccl/lib:/usr/local/cuda/lib64:/usr/local/lib
-ENV OPAL_PREFIX=/opt/amazon/${OMPI_DEFAULT}
+ENV PATH=${MPI_HOME}/bin:${EFA_HOME}/bin:/usr/local/cuda/bin:${PATH}
+ENV LD_LIBRARY_PATH=${EFA_HOME}/lib:${MPI_HOME}/lib:${PMIX_HOME}/lib:${OFI_HOME}/lib:/usr/local/cuda/lib64:/usr/local/lib
+ENV OPAL_PREFIX=${OPAL_PREFIX}
 
 # SSH login shells do not automatically inherit Docker ENV declarations;
 # ensure profile.d exports match the ENV block above so interactive sessions
 # (e.g. `ssh login` or `kubectl exec` into slurmd) resolve mpirun, nvcc, etc.
 RUN <<EOR
 set -xeuo pipefail
-cat > /etc/profile.d/amazon-efa-ompi5.sh <<PROFILE
-export PATH=/opt/amazon/${OMPI_DEFAULT}/bin:/opt/amazon/efa/bin:/usr/local/cuda/bin:\${PATH}
-export LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/amazon/${OMPI_DEFAULT}/lib:/opt/amazon/pmix/lib:/opt/amazon/ofi-nccl/lib:/usr/local/cuda/lib64:/usr/local/lib
-export OPAL_PREFIX=/opt/amazon/${OMPI_DEFAULT}
+cat > /etc/profile.d/fabric-runtime.sh <<PROFILE
+export PATH=${MPI_HOME}/bin:${EFA_HOME}/bin:/usr/local/cuda/bin:\${PATH}
+export LD_LIBRARY_PATH=${EFA_HOME}/lib:${MPI_HOME}/lib:${PMIX_HOME}/lib:${OFI_HOME}/lib:/usr/local/cuda/lib64:/usr/local/lib
 PROFILE
-chmod 644 /etc/profile.d/amazon-efa-ompi5.sh
+if [ -n "${OPAL_PREFIX}" ]; then
+  echo "export OPAL_PREFIX=${OPAL_PREFIX}" >> /etc/profile.d/fabric-runtime.sh
+fi
+chmod 644 /etc/profile.d/fabric-runtime.sh
 cat > /etc/nccl.conf <<'EOF'
 NCCL_SOCKET_IFNAME=^docker,lo,veth
 EOF

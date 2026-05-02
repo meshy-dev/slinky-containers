@@ -1,10 +1,7 @@
 ---
-# Builds and pushes ghcr.io/meshy-dev/slinky-containers/slurmd:*cuda13.2*efa
-# via the `slurmd-cuda-efa` bake target (schedmd/slurm/docker-bake.hcl).
-#
-# This workflow is fork-local and independent of the legacy
-# taichi-dev/deployments build-slurmd-nccl.yaml workflow (not a reuse).
-name: build-slurmd-cuda-efa
+# Builds and pushes ghcr.io/meshy-dev/slinky-containers/slurmd:*cuda13.2*
+# for both EFA and IB fabric variants via matrix strategy.
+name: build-slurmd-cuda
 
 on:
   push:
@@ -13,7 +10,7 @@ on:
       - feat/forles-slurmd-efa-cuda13
     paths:
       - schedmd/slurm/**
-      - .github/workflows/build-slurmd-cuda-efa.yaml
+      - .github/workflows/build-slurmd-cuda.yaml
   workflow_dispatch:
 
 permissions:
@@ -23,6 +20,13 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - fabric: efa
+            target: "slurmd-cuda-efa login"
+          - fabric: ib
+            target: "slurmd-cuda-ib login-cuda-ib"
     steps:
       - uses: actions/checkout@v4
 
@@ -31,14 +35,11 @@ jobs:
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ghcr
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Bake and push slurmd-cuda-efa
-        # BAKE_IMPORTS pulls in the per-version/flavor overrides (slurm_version,
-        # linux_flavor) defined in 25.11/ubuntu24.04/slurm.hcl on top of the
-        # root docker-bake.hcl.
+      - name: Bake and push ${{ matrix.fabric }}
         env:
           BAKE_IMPORTS: schedmd/slurm/25.11/ubuntu24.04/slurm.hcl
           SHA: ${{ github.sha }}
@@ -47,5 +48,5 @@ jobs:
           docker buildx bake \
             -f docker-bake.hcl \
             -f 25.11/ubuntu24.04/slurm.hcl \
-            slurmd-cuda-efa login \
+            ${{ matrix.target }} \
             --push

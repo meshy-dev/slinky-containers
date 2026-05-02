@@ -25,6 +25,9 @@ variable "OMPI_DEFAULT"           { default = "openmpi5" }
 variable "NCCL_CUDA_SUFFIX"       { default = "cuda13.2" }
 variable "NVCC_GENCODE"           { default = "-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100" }
 variable "DEBIAN_FRONTEND"        { default = "noninteractive" }
+variable "FABRIC"                 { default = "ib" }
+variable "DOCA_REPO_URL"          { default = "https://linux.mellanox.com/public/repo/doca/latest/ubuntu24.04/x86_64/" }
+variable "IB_OMPI_DEFAULT"        { default = "openmpi" }
 
 # GHA injects GITHUB_SHA; local builds get an empty string (tag dropped by compact()).
 variable "SHA" { default = "" }
@@ -317,11 +320,117 @@ target "slurmd-cuda-efa" {
     NCCL_CUDA_SUFFIX      = NCCL_CUDA_SUFFIX
     NVCC_GENCODE          = NVCC_GENCODE
     DEBIAN_FRONTEND       = DEBIAN_FRONTEND
+    FABRIC                = "efa"
+    FABRIC_BASE           = "base-efa"
+    MPI_HOME              = "/opt/amazon/openmpi5"
+    EFA_HOME              = "/opt/amazon/efa"
+    PMIX_HOME             = "/opt/amazon/pmix"
+    OFI_HOME              = "/opt/amazon/ofi-nccl"
+    OPAL_PREFIX           = "/opt/amazon/openmpi5"
   }
   tags = compact([
     "${REGISTRY}/slurmd:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-efa",
     "${REGISTRY}/slurmd:25.11-cuda13.2-ubuntu24.04-efa",
     SHA != "" ? "${REGISTRY}/slurmd:${SHA}" : "",
+  ])
+}
+
+################################################################################
+# login-cuda-efa: login node inheriting EFA runtime from slurmd.
+
+target "login-cuda-efa" {
+  inherits = ["_login"]
+  context = "25.11/ubuntu24.04"
+  dockerfile = "Dockerfile"
+  target = "login"
+  platforms = ["linux/amd64"]
+  args = {
+    PARENT_IMAGE          = PARENT_IMAGE
+    CUDA_TOOLKIT_VERSION  = CUDA_TOOLKIT_VERSION
+    SLURM_VERSION         = SLURM_VERSION_CUDA_EFA
+    SLURM_DEB_PATCH_REV   = SLURM_DEB_PATCH_REV
+    EFA_INSTALLER_VERSION = EFA_INSTALLER_VERSION
+    EFA_INSTALLER_FLAGS   = EFA_INSTALLER_FLAGS
+    OMPI_DEFAULT          = OMPI_DEFAULT
+    NCCL_CUDA_SUFFIX      = NCCL_CUDA_SUFFIX
+    NVCC_GENCODE          = NVCC_GENCODE
+    DEBIAN_FRONTEND       = DEBIAN_FRONTEND
+    FABRIC                = "efa"
+    FABRIC_BASE           = "base-efa"
+    MPI_HOME              = "/opt/amazon/openmpi5"
+    EFA_HOME              = "/opt/amazon/efa"
+    PMIX_HOME             = "/opt/amazon/pmix"
+    OFI_HOME              = "/opt/amazon/ofi-nccl"
+    OPAL_PREFIX           = "/opt/amazon/openmpi5"
+  }
+  tags = compact([
+    "${REGISTRY}/login:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-efa",
+    "${REGISTRY}/login:25.11-cuda13.2-ubuntu24.04-efa",
+  ])
+}
+
+################################################################################
+# slurmd-cuda-ib: consolidated slurmd image, CUDA 13.2 + DOCA IB + OMPI +
+# system PMIx.
+
+target "slurmd-cuda-ib" {
+  inherits = ["_slurmd"]
+  context = "25.11/ubuntu24.04"
+  dockerfile = "Dockerfile"
+  target = "slurmd"
+  platforms = ["linux/amd64"]
+  args = {
+    PARENT_IMAGE          = PARENT_IMAGE
+    CUDA_TOOLKIT_VERSION  = CUDA_TOOLKIT_VERSION
+    SLURM_VERSION         = SLURM_VERSION_CUDA_EFA
+    SLURM_DEB_PATCH_REV   = SLURM_DEB_PATCH_REV
+    NCCL_CUDA_SUFFIX      = NCCL_CUDA_SUFFIX
+    NVCC_GENCODE          = NVCC_GENCODE
+    DEBIAN_FRONTEND       = DEBIAN_FRONTEND
+    FABRIC                = "ib"
+    FABRIC_BASE           = "base-ib"
+    OMPI_DEFAULT          = IB_OMPI_DEFAULT
+    MPI_HOME              = "/usr/mpi/gcc/openmpi"
+    EFA_HOME              = "/usr"
+    PMIX_HOME             = "/usr"
+    OFI_HOME              = "/usr"
+    OPAL_PREFIX           = "/usr/mpi/gcc/openmpi"
+  }
+  tags = compact([
+    "${REGISTRY}/slurmd:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-ib",
+    "${REGISTRY}/slurmd:25.11-cuda13.2-ubuntu24.04-ib",
+  ])
+}
+
+################################################################################
+# login-cuda-ib: login node inheriting IB runtime from slurmd.
+
+target "login-cuda-ib" {
+  inherits = ["_login"]
+  context = "25.11/ubuntu24.04"
+  dockerfile = "Dockerfile"
+  target = "login"
+  platforms = ["linux/amd64"]
+  args = {
+    PARENT_IMAGE          = PARENT_IMAGE
+    CUDA_TOOLKIT_VERSION  = CUDA_TOOLKIT_VERSION
+    SLURM_VERSION         = SLURM_VERSION_CUDA_EFA
+    SLURM_DEB_PATCH_REV   = SLURM_DEB_PATCH_REV
+    NCCL_CUDA_SUFFIX      = NCCL_CUDA_SUFFIX
+    NVCC_GENCODE          = NVCC_GENCODE
+    DEBIAN_FRONTEND       = DEBIAN_FRONTEND
+    FABRIC                = "ib"
+    FABRIC_BASE           = "base-ib"
+    OMPI_DEFAULT          = IB_OMPI_DEFAULT
+    MPI_HOME              = "/usr/mpi/gcc/openmpi"
+    EFA_HOME              = "/usr"
+    PMIX_HOME             = "/usr"
+    OFI_HOME              = "/usr"
+    OPAL_PREFIX           = "/usr/mpi/gcc/openmpi"
+  }
+  tags = compact([
+    "${REGISTRY}/login:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-ib",
+    "${REGISTRY}/login:25.11-cuda13.2-ubuntu24.04-ib",
   ])
 }
 
