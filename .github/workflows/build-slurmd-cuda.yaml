@@ -7,7 +7,6 @@ on:
   push:
     branches:
       - main
-      - feat/forles-slurmd-efa-cuda13
     paths:
       - schedmd/slurm/**
       - .github/workflows/build-slurmd-cuda.yaml
@@ -19,7 +18,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
