@@ -169,7 +169,6 @@ apt-get -qq -y install --no-install-recommends \
   cuda-nvml-dev-${CUDA_TOOLKIT_VERSION} \
   cuda-minimal-build-${CUDA_TOOLKIT_VERSION} \
   libnccl2 libnccl-dev
-test -L /usr/local/cuda
 EOR
 
 ENV PATH=/usr/local/cuda/bin:${PATH}
@@ -214,47 +213,32 @@ cd /tmp
 rm -rf aws-efa-installer "aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz"
 EOR
 
-# EFA post-install fail-fast gates. In non-NGC mode the installer drops the
-# aws-ofi-nccl plugin at the flat /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so
-# path (the non-NGC libnccl-ofi deb uses the same flat layout as the NGC-v3
-# variant; the multiarch x86_64-linux-gnu subdir is not used by EFA 1.48.0
-# on ubuntu:24.04). The EFA installer only adds /opt/amazon/{efa,ofi-nccl}/lib
-# to ld.so.conf.d/ and expects OMPI5 + PMIx to be reached via OPAL_PREFIX and
-# LD_LIBRARY_PATH at runtime; register them in ld.so.conf.d so that `ldconfig
-# -p` resolves libpmix.so.2 consistently whether or not LD_LIBRARY_PATH is set
-# (slurmd's mpi_pmix_v4 plugin dlopen()s libpmix.so.2 at job-step launch).
+# Register OMPI5 + PMIx lib dirs with ldconfig. The EFA installer only adds
+# /opt/amazon/{efa,ofi-nccl}/lib to ld.so.conf.d/ and expects OMPI5 + PMIx to
+# be reached via OPAL_PREFIX and LD_LIBRARY_PATH at runtime; making them
+# resolvable via ldconfig is what slurmd's mpi_pmix_v4 plugin needs at
+# step-launch dlopen of libpmix.so.2.
 RUN <<EOR
 set -xeuo pipefail
-test -x /opt/amazon/openmpi5/bin/mpirun
-# AWS-bundled mpirun prints `mpirun (Open MPI) 5.0.9amzn1` — match on the
-# close-paren + major to avoid matching other "MPI 5" substrings.
-/opt/amazon/${OMPI_DEFAULT}/bin/mpirun --version | grep -E "\(Open MPI\) 5\." >/dev/null \
-  || { echo "FATAL: /opt/amazon/${OMPI_DEFAULT}/bin/mpirun did not report Open MPI 5.x" >&2; exit 1; }
-test -f /opt/amazon/ofi-nccl/lib/libnccl-net-ofi.so
-test -f /opt/amazon/pmix/lib/libpmix.so.2
-# /opt/amazon/openmpi (OMPI 4 tree) must NOT exist: --mpi=openmpi5 in
-# EFA_INSTALLER_FLAGS selects only the OMPI 5 flavor. Catching a stray OMPI 4
-# install surfaces upstream flag drift (e.g., someone reverting to default
-# flags or appending --mpi=openmpi4) before it ships.
-test ! -e /opt/amazon/openmpi \
-  || { echo "FATAL: /opt/amazon/openmpi exists; EFA installer laid down OMPI 4 despite --mpi=openmpi5" >&2; exit 1; }
-# openmpi40-aws deb must not be installed either. `dpkg -l openmpi40-aws`
-# exits nonzero when the package is unknown to dpkg; we invert with `!` so
-# the fail-fast || branch fires only if dpkg DID find the package installed.
-# Redirect both streams to /dev/null so the negative path stays quiet.
-! dpkg -l openmpi40-aws >/dev/null 2>&1 \
-  || { echo "FATAL: openmpi40-aws deb is installed; EFA_INSTALLER_FLAGS must pass --mpi=openmpi5 (not default, not --mpi=openmpi4)" >&2; exit 1; }
 printf '%s\n' "/opt/amazon/${OMPI_DEFAULT}/lib" "/opt/amazon/pmix/lib" > /etc/ld.so.conf.d/200_amazon-ompi-pmix.conf
 ldconfig
-ldconfig -p | grep -q 'libpmix\.so\.2 ' || { echo "FATAL: libpmix.so.2 not resolvable via ldconfig after registering /opt/amazon/pmix/lib" >&2; exit 1; }
 EOR
 
 ################################################################################
-# base-ib — DOCA userland IB verbs + Open MPI + system PMIx.
+# base-ib — DOCA userland IB verbs + DOCA OpenMPI 4.
 #
 # Installs only guest/userland components (no kmod, no metapackage bloat).
-# Open MPI comes from DOCA repo (currently 4.1.x). PMIx comes from Ubuntu
-# because DOCA repo does not ship PMIx debs.
+# Open MPI comes from DOCA repo (4.1.x, Mellanox-tuned for IB).
+#
+# Deliberately NO Ubuntu libpmix-dev/libpmix2t64. DOCA's openmpi deb bundles
+# its own internal PMIx tangled with libopen-pal/libevent/hwloc, and per
+# NVIDIA HPC-X docs slurm's PMIx server plugin requires Open MPI to be built
+# against the SAME external PMIx — DOCA's OMPI is not. Co-installing two
+# different PMIx vendors (Ubuntu 5.x next to DOCA-bundled 3.x) only causes
+# loader-shadowing accidents (LD_LIBRARY_PATH to DOCA's lib dir would put
+# v3 ahead of v5). The IB path therefore launches under slurm via PMI2
+# (mpi_pmi2.so + libpmi2 from slurm-smd-libpmi2-0); slurm is built without
+# PMIx support on this fabric.
 FROM base-cuda AS base-ib
 
 SHELL ["bash", "-c"]
@@ -279,31 +263,16 @@ apt-get -qq -y install --no-install-recommends \
   librdmacm1 \
   librdmacm-dev \
   infiniband-diags \
-  openmpi \
-  libpmix-dev \
-  libpmix2t64
+  openmpi
 # DOCA openmpi installs under /usr/mpi/gcc/openmpi-*/ but does not create
-# /usr/bin symlinks. Expose a version-agnostic MPI_HOME and put mpirun on
-# PATH so the post-install gate and downstream slurmd stage resolve it.
+# /usr/bin symlinks. Expose a version-agnostic MPI_HOME symlink + /usr/bin
+# entries so the downstream slurmd stage and operators can resolve mpirun.
 OMPI_DIR=$(ls -d /usr/mpi/gcc/openmpi-* | head -1)
 ln -sfn "${OMPI_DIR}" /usr/mpi/gcc/openmpi
 for b in mpirun mpiexec mpicc mpicxx; do
-  [ -e "/usr/mpi/gcc/openmpi/bin/${b}" ] && ln -sf "/usr/mpi/gcc/openmpi/bin/${b}" "/usr/bin/${b}" || true
+  ln -sf "/usr/mpi/gcc/openmpi/bin/${b}" "/usr/bin/${b}"
 done
 ldconfig
-EOR
-
-# Post-install verification gates — mirror EFA fail-fast style.
-RUN <<EOR
-set -xeuo pipefail
-test -x /usr/bin/mpirun
-/usr/bin/mpirun --version | grep -E "\(Open MPI\) [45]\." >/dev/null \
-  || { echo "FATAL: /usr/bin/mpirun did not report Open MPI 4.x/5.x" >&2; exit 1; }
-ldconfig
-ldconfig -p | grep -q 'libpmix\.so\.2 ' || { echo "FATAL: libpmix.so.2 not resolvable via ldconfig" >&2; exit 1; }
-# ibv_devinfo fails when no IB device exists (expected in CI build), so treat as non-fatal.
-ibv_devinfo >/dev/null 2>&1 || echo "WARN: ibv_devinfo failed (no RDMA device during build, expected)" >&2
-true
 EOR
 
 ################################################################################

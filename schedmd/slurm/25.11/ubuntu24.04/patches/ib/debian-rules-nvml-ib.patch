@@ -1,14 +1,18 @@
-Description: Configure Slurm with NVML for IB fabric path.
+Description: Configure Slurm with NVML for IB fabric path; drop --with-pmix.
  --with-nvml=/usr/local/cuda tells slurm's GPU autodetect plugin to
  link libnvidia-ml at build time, enabling slurmd GPU enumeration via
- NVML (required for GresTypes=gpu + GPUs GRES binding on forles B200
- nodes).
- --with-pmix is kept without explicit prefix so configure auto-detects
- the system PMIx from Ubuntu's libpmix-dev/libpmix2 packages (used by
- the IB fabric path instead of the EFA-bundled PMIx under /opt/amazon/pmix).
+ NVML (required for GresTypes=gpu + GPUs GRES binding on H200 nodes).
+ .
+ --with-pmix is intentionally absent. The IB image uses DOCA's OpenMPI 4
+ which bundles its own internal PMIx (tangled with libopen-pal/libevent/
+ hwloc) rather than building against an external PMIx — the configuration
+ NVIDIA HPC-X docs explicitly call out as incompatible with slurm's PMIx
+ server plugin. The IB path launches under slurm via PMI2 (mpi_pmi2.so +
+ libpmi2 from slurm-smd-libpmi2-0); building slurm without PMIx server
+ support keeps the image free of mismatched openmpi/PMIx vendors.
 Author: meshy-dev
 Forwarded: not-needed
-Last-Update: 2026-04-19
+Last-Update: 2026-05-06
 --- a/debian/rules
 +++ b/debian/rules
 @@ -20,7 +20,7 @@ override_dh_autoreconf:
@@ -16,7 +20,7 @@ Last-Update: 2026-04-19
  	# Run with --disable-debug to allow optimizations, -g is still provided
  	# by dpkg-buildflags.
 -	dh_auto_configure -- --sysconfdir=/etc/slurm --disable-debug --with-mysql_config --with-slurmrestd --with-pmix --enable-pam --with-pam_dir=/usr/lib/$(DEB_HOST_MULTIARCH)/security --with-systemdsystemunitdir=/lib/systemd/system/ SUCMD=/bin/su SLEEP_CMD=/bin/sleep
-+	dh_auto_configure -- --sysconfdir=/etc/slurm --disable-debug --with-mysql_config --with-slurmrestd --with-pmix --with-nvml=/usr/local/cuda --enable-pam --with-pam_dir=/usr/lib/$(DEB_HOST_MULTIARCH)/security --with-systemdsystemunitdir=/lib/systemd/system/ SUCMD=/bin/su SLEEP_CMD=/bin/sleep
- 
++	dh_auto_configure -- --sysconfdir=/etc/slurm --disable-debug --with-mysql_config --with-slurmrestd --with-nvml=/usr/local/cuda --enable-pam --with-pam_dir=/usr/lib/$(DEB_HOST_MULTIARCH)/security --with-systemdsystemunitdir=/lib/systemd/system/ SUCMD=/bin/su SLEEP_CMD=/bin/sleep
+
  override_dh_auto_install:
  	dh_auto_install

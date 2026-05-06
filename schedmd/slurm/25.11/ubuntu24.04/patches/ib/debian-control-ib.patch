@@ -1,17 +1,22 @@
-Description: Add cuda-nvml-dev-13-2 build-dep for IB fabric path.
+Description: IB fabric build-deps: add cuda-nvml-dev, drop libpmix-dev.
  cuda-nvml-dev-13-2 ships nvml.h at /usr/local/cuda/include/nvml.h and a
  link-time libnvidia-ml.so stub under /usr/local/cuda/lib64/stubs, which
  is what Slurm's --with-nvml=/usr/local/cuda configure flag consumes to
  enable the mpi/gpu_nvml autodetect plugin at build time (runtime
  libnvidia-ml.so.1 is injected by nvidia-container-toolkit from the host
- driver). Unlike the EFA path, libpmix-dev is kept because the IB path
- links against the system PMIx provided by Ubuntu's libpmix-dev package.
+ driver).
+ libpmix-dev is dropped because the IB image runs DOCA's OpenMPI 4 which
+ ships its own internal PMIx tangled with libopen-pal/libevent/hwloc.
+ Per NVIDIA HPC-X docs, slurm's PMIx server plugin requires Open MPI to
+ be built against the SAME external PMIx — DOCA's OMPI is not. The IB
+ path therefore launches under slurm via PMI2 (mpi_pmi2.so + libpmi2)
+ and slurm is built without PMIx server support entirely.
 Author: meshy-dev
 Forwarded: not-needed
-Last-Update: 2026-04-19
+Last-Update: 2026-05-06
 --- a/debian/control
 +++ b/debian/control
-@@ -14,6 +14,7 @@ Build-Depends:
+@@ -14,6 +14,7 @@
   libgtk2.0-dev,
   libhdf5-dev,
   libhttp-parser-dev,
@@ -19,3 +24,11 @@ Last-Update: 2026-04-19
   libhwloc-dev,
   libipmimonitoring-dev,
   libjson-c-dev,
+@@ -25,7 +26,6 @@
+  libncurses-dev,
+  libpam0g-dev,
+  libperl-dev,
+- libpmix-dev,
+  librdkafka-dev,
+  librrd-dev,
+  libyaml-dev,
