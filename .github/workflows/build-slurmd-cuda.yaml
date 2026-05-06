@@ -23,7 +23,7 @@ jobs:
       matrix:
         include:
           - fabric: efa
-            target: "slurmd-cuda-efa login"
+            target: "slurmd-cuda-efa login login-cuda-efa"
           - fabric: ib
             target: "slurmd-cuda-ib login-cuda-ib"
     steps:
