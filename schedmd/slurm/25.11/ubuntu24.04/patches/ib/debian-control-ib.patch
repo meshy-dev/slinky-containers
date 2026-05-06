@@ -5,11 +5,11 @@ Description: IB fabric build-deps: add cuda-nvml-dev, drop apt libpmix-dev.
  enable the mpi/gpu_nvml autodetect plugin at build time (runtime
  libnvidia-ml.so.1 is injected by nvidia-container-toolkit from the host
  driver).
- libpmix-dev is dropped because the IB image builds slurm against DOCA's
- standalone PMIx 3.2.5 (under /usr/mpi/gcc/openmpi/, see debian/rules
- --with-pmix= patch). Keeping apt libpmix-dev (PMIx 5.x) installed would
- put two PMIx vendors on the image and let the wrong pmix.h leak into
- the build search path.
+ libpmix-dev is dropped because the IB image builds slurm against HPC-X's
+ PMIx 5 (under /opt/mellanox/hpcx/ompi5/, see debian/rules --with-pmix=
+ patch). Keeping apt libpmix-dev installed would put a second pmix.h on
+ the build search path and a second libpmix.so on the loader path, with
+ the wrong vendor/ABI for the HPC-X OMPI 5 stack.
 Author: meshy-dev
 Forwarded: not-needed
 Last-Update: 2026-05-06

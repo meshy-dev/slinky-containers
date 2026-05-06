@@ -225,26 +225,35 @@ ldconfig
 EOR
 
 ################################################################################
-# base-ib — DOCA userland IB verbs + DOCA OpenMPI 4.
+# base-ib — DOCA-OFED userland IB verbs + NVIDIA HPC-X SDK (OMPI 5 + PMIx 5).
 #
-# Installs only guest/userland components (no kmod, no metapackage bloat).
-# Open MPI comes from DOCA repo (4.1.x, Mellanox-tuned for IB).
+# IB userland (rdma-core, ibverbs, infiniband-diags) comes from the DOCA repo.
+# We deliberately do NOT install DOCA's `openmpi` apt package: its libpmix.so
+# has 21 unresolved references to symbols inside libopen-pal (opal_libevent2022_*
+# / opal_hwloc201_*), which makes slurm's autoconf AC_LINK_IFELSE on -lpmix fail.
+# The DOCA OMPI is also OMPI 4 + PMIx 3.2.5, which is not the modern stack.
 #
-# Deliberately NO Ubuntu libpmix-dev/libpmix2t64. DOCA's openmpi deb installs
-# a complete standalone PMIx 3.2.5 tree under /usr/mpi/gcc/openmpi-4.1.9a1/
-# (libpmix.so.2 + pmix.h + pmix.pc) which is the PMIx that DOCA OMPI itself
-# is linked against. The slurm-build stage builds slurm --with-pmix pointing
-# at this tree, so slurmd's mpi/pmix server plugin and DOCA OMPI's PMIx
-# client share one ABI-identical libpmix.so.2 — the single-vendor invariant
-# NVIDIA HPC-X requires. Co-installing apt libpmix-dev (PMIx 5.x) would only
-# put a second pmix.h on the build search path and a second libpmix.so on
-# the loader path, with no benefit (DOCA OMPI was not built --with-pmi=slurm,
-# so PMI-2-only launch is not an option on this fabric).
+# Instead we lay down NVIDIA HPC-X SDK at /opt/mellanox/hpcx. HPC-X ships both
+# ompi4 (OMPI 4 + PMIx 3) and ompi5 (OMPI 5 + PMIx 5.0.10rc3) trees, plus UCX,
+# HCOLL, SHARP, UCC, and the NCCL-RDMA-SHARP plugin. We expose only the OMPI 5
+# tree to slurmd so the mpi/pmix plugin links against PMIx 5 cleanly. The OMPI 5
+# libpmix.so.2 has self-contained DT_NEEDED entries (libevent_core,
+# libevent_pthreads, libhwloc) and `$ORIGIN/.` RUNPATH, so it is portable.
+#
+# Deliberately NO Ubuntu apt libpmix-dev/libpmix2t64: HPC-X's PMIx is the only
+# PMIx installed on the image, keeping the loader search path unambiguous.
 FROM base-cuda AS base-ib
 
 SHELL ["bash", "-c"]
 
 ARG DEBIAN_FRONTEND=noninteractive
+# HPC-X SDK pin. Update by querying the downloader API at
+#   https://downloaders.azurewebsites.net/downloaders/hpcx_downloader/helper.php
+# (see slinky-containers/docs/hpcx-pin.md if added later) and verifying SHA256.
+ARG HPCX_VERSION=v2.26
+ARG HPCX_TARBALL=hpcx-v2.26-gcc-doca_ofed-ubuntu24.04-cuda13-x86_64.tbz
+ARG HPCX_URL=https://content.mellanox.com/hpc/hpc-x/v2.26_cuda13/hpcx-v2.26-gcc-doca_ofed-ubuntu24.04-cuda13-x86_64.tbz
+ARG HPCX_SHA256=57656486279f6bcf44bfc60228bac5c34e25366e6d3b7f7d1d0a46427a8836ff
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
@@ -263,22 +272,39 @@ apt-get -qq -y install --no-install-recommends \
   libibverbs-dev \
   librdmacm1 \
   librdmacm-dev \
-  infiniband-diags \
-  openmpi
-# DOCA openmpi installs under /usr/mpi/gcc/openmpi-*/ but does not create
-# /usr/bin symlinks. Expose a version-agnostic MPI_HOME symlink + /usr/bin
-# entries so the downstream slurmd stage and operators can resolve mpirun.
-OMPI_DIR=$(ls -d /usr/mpi/gcc/openmpi-* | head -1)
-ln -sfn "${OMPI_DIR}" /usr/mpi/gcc/openmpi
+  infiniband-diags
+EOR
+
+# Lay down HPC-X SDK at /opt/mellanox/hpcx. Versioned dir is the actual extract
+# target; /opt/mellanox/hpcx is a symlink to it so paths in slurm builds and
+# ld.so.conf.d entries are stable across HPCX_VERSION bumps.
+RUN <<EOR
+set -xeuo pipefail
+cd /tmp
+curl -fsSL --retry 3 -o "${HPCX_TARBALL}" "${HPCX_URL}"
+echo "${HPCX_SHA256}  ${HPCX_TARBALL}" | sha256sum -c -
+mkdir -p /opt/mellanox
+tar -xf "${HPCX_TARBALL}" -C /opt/mellanox
+HPCX_DIR=$(ls -d /opt/mellanox/hpcx-* | head -1)
+ln -sfn "${HPCX_DIR}" /opt/mellanox/hpcx
+rm -f "${HPCX_TARBALL}"
+# Deliberately NOT adding /opt/mellanox/hpcx/*/lib to /etc/ld.so.conf.d/.
+# HPC-X is fully self-resolving:
+#   - slurm's mpi_pmix_v5.so plugin is built --with-pmix=/opt/mellanox/hpcx/ompi5,
+#     and slurm's autoconf bakes -Wl,-rpath,$pmix_libdir into the plugin
+#     (PMIX_V5_LDFLAGS), so slurmstepd dlopens the right libpmix.so.2 at MPI step
+#     launch without depending on ld.so.cache;
+#   - HPC-X's libpmix.so itself has DT_RUNPATH=$ORIGIN/. so its sibling libs
+#     (libevent_core, libevent_pthreads, libhwloc) resolve relative to its own
+#     directory;
+#   - HPC-X mpirun / mpiexec carry DT_RPATH=$ORIGIN/../lib so they self-resolve
+#     when invoked via the /usr/bin symlinks below.
+# Putting HPC-X libs on /etc/ld.so.conf.d/ would shadow Ubuntu's libhwloc.so.15
+# during the slurmd link, causing dh_shlibdeps to fail with "no dependency
+# information found" (HPC-X libs are not from any Debian package).
 for b in mpirun mpiexec mpicc mpicxx; do
-  ln -sf "/usr/mpi/gcc/openmpi/bin/${b}" "/usr/bin/${b}"
+  ln -sf "/opt/mellanox/hpcx/ompi5/bin/${b}" "/usr/bin/${b}"
 done
-# Expose DOCA OMPI's lib dir to the system loader so libpmix.so.2
-# (and the OMPI runtime libs) resolve via ldconfig. Required for slurmd
-# step launch: mpi_pmix.so is built --with-pmix=/usr/mpi/gcc/openmpi
-# and dlopens libpmix.so.2 at MPI step bootstrap.
-printf '%s\n' "/usr/mpi/gcc/openmpi/lib" > /etc/ld.so.conf.d/200_doca-ompi.conf
-ldconfig
 EOR
 
 ################################################################################
@@ -289,7 +315,7 @@ EOR
 # from patches/common/ then patches/${FABRIC}/ so EFA and IB paths receive the
 # correct debian/control and debian/rules hunks (EFA drops apt libpmix-dev and
 # points --with-pmix at /opt/amazon/pmix; IB drops apt libpmix-dev and points
-# --with-pmix at /usr/mpi/gcc/openmpi where DOCA's PMIx 3.2.5 lives).
+# --with-pmix at /opt/mellanox/hpcx/ompi5 where HPC-X's PMIx 5 lives).
 ARG FABRIC=ib
 ARG FABRIC_BASE=base-${FABRIC}
 FROM ${FABRIC_BASE} AS slurm-build
@@ -338,7 +364,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
 mk-build-deps -ir --tool='apt-get -y -o Debug::pkgProblemResolver=yes --no-install-recommends' ${SLURM_DIR}/debian/control >/dev/null
-( cd ${SLURM_DIR} && debuild -b -uc -us )
+( cd ${SLURM_DIR} && debuild -b -uc -us >/dev/null )
 EOR
 
 ################################################################################

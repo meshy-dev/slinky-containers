@@ -1,17 +1,16 @@
-Description: Configure Slurm with NVML and DOCA-bundled PMIx for IB fabric.
+Description: Configure Slurm with NVML and HPC-X PMIx 5 for IB fabric.
  --with-nvml=/usr/local/cuda tells slurm's GPU autodetect plugin to
  link libnvidia-ml at build time, enabling slurmd GPU enumeration via
  NVML (required for GresTypes=gpu + GPUs GRES binding on H200 nodes).
  .
- --with-pmix=/usr/mpi/gcc/openmpi points slurmd's mpi/pmix plugin at
- the standalone PMIx 3.2.5 tree shipped inside DOCA's OpenMPI install
- (DOCA openmpi.deb lays down libpmix.so.2 + pmix.h + pmix.pc under
- /usr/mpi/gcc/openmpi-4.1.9a1/, exposed via the /usr/mpi/gcc/openmpi
- version-agnostic symlink). This keeps slurmd's PMIx server plugin
- ABI-identical to the PMIx client linked into DOCA OpenMPI 4 — single
- vendor, no cross-version dance — which is what NVIDIA HPC-X / DOCA
- OMPI requires (DOCA OMPI was not built --with-pmi=slurm and only
- supports PMIx-based launch).
+ --with-pmix=/opt/mellanox/hpcx/ompi5 points slurmd's mpi/pmix plugin
+ at the PMIx 5.0.10rc3 tree shipped inside NVIDIA HPC-X SDK's OMPI 5
+ subtree. HPC-X's ompi5/lib/libpmix.so.2 has self-contained DT_NEEDED
+ entries (libevent_core, libevent_pthreads, libhwloc) and `$ORIGIN/.`
+ RUNPATH, so it links cleanly without dragging in libopen-pal — unlike
+ DOCA-OFED's openmpi.deb whose libpmix has 21 unresolved opal_libevent2022_*
+ / opal_hwloc201_* symbols. HPC-X is also the modern OMPI 5 + PMIx 5
+ stack NVIDIA documents for HPC + slurm; OMPI 4 / PMIx 3 are not used.
 Author: meshy-dev
 Forwarded: not-needed
 Last-Update: 2026-05-06
@@ -22,7 +21,7 @@ Last-Update: 2026-05-06
  	# Run with --disable-debug to allow optimizations, -g is still provided
  	# by dpkg-buildflags.
 -	dh_auto_configure -- --sysconfdir=/etc/slurm --disable-debug --with-mysql_config --with-slurmrestd --with-pmix --enable-pam --with-pam_dir=/usr/lib/$(DEB_HOST_MULTIARCH)/security --with-systemdsystemunitdir=/lib/systemd/system/ SUCMD=/bin/su SLEEP_CMD=/bin/sleep
-+	dh_auto_configure -- --sysconfdir=/etc/slurm --disable-debug --with-mysql_config --with-slurmrestd --with-pmix=/usr/mpi/gcc/openmpi --with-nvml=/usr/local/cuda --enable-pam --with-pam_dir=/usr/lib/$(DEB_HOST_MULTIARCH)/security --with-systemdsystemunitdir=/lib/systemd/system/ SUCMD=/bin/su SLEEP_CMD=/bin/sleep
++	dh_auto_configure -- --sysconfdir=/etc/slurm --disable-debug --with-mysql_config --with-slurmrestd --with-pmix=/opt/mellanox/hpcx/ompi5 --with-nvml=/usr/local/cuda --enable-pam --with-pam_dir=/usr/lib/$(DEB_HOST_MULTIARCH)/security --with-systemdsystemunitdir=/lib/systemd/system/ SUCMD=/bin/su SLEEP_CMD=/bin/sleep
 
  override_dh_auto_install:
  	dh_auto_install
