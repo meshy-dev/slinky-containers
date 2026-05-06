@@ -230,15 +230,16 @@ EOR
 # Installs only guest/userland components (no kmod, no metapackage bloat).
 # Open MPI comes from DOCA repo (4.1.x, Mellanox-tuned for IB).
 #
-# Deliberately NO Ubuntu libpmix-dev/libpmix2t64. DOCA's openmpi deb bundles
-# its own internal PMIx tangled with libopen-pal/libevent/hwloc, and per
-# NVIDIA HPC-X docs slurm's PMIx server plugin requires Open MPI to be built
-# against the SAME external PMIx — DOCA's OMPI is not. Co-installing two
-# different PMIx vendors (Ubuntu 5.x next to DOCA-bundled 3.x) only causes
-# loader-shadowing accidents (LD_LIBRARY_PATH to DOCA's lib dir would put
-# v3 ahead of v5). The IB path therefore launches under slurm via PMI2
-# (mpi_pmi2.so + libpmi2 from slurm-smd-libpmi2-0); slurm is built without
-# PMIx support on this fabric.
+# Deliberately NO Ubuntu libpmix-dev/libpmix2t64. DOCA's openmpi deb installs
+# a complete standalone PMIx 3.2.5 tree under /usr/mpi/gcc/openmpi-4.1.9a1/
+# (libpmix.so.2 + pmix.h + pmix.pc) which is the PMIx that DOCA OMPI itself
+# is linked against. The slurm-build stage builds slurm --with-pmix pointing
+# at this tree, so slurmd's mpi/pmix server plugin and DOCA OMPI's PMIx
+# client share one ABI-identical libpmix.so.2 — the single-vendor invariant
+# NVIDIA HPC-X requires. Co-installing apt libpmix-dev (PMIx 5.x) would only
+# put a second pmix.h on the build search path and a second libpmix.so on
+# the loader path, with no benefit (DOCA OMPI was not built --with-pmi=slurm,
+# so PMI-2-only launch is not an option on this fabric).
 FROM base-cuda AS base-ib
 
 SHELL ["bash", "-c"]
@@ -272,6 +273,11 @@ ln -sfn "${OMPI_DIR}" /usr/mpi/gcc/openmpi
 for b in mpirun mpiexec mpicc mpicxx; do
   ln -sf "/usr/mpi/gcc/openmpi/bin/${b}" "/usr/bin/${b}"
 done
+# Expose DOCA OMPI's lib dir to the system loader so libpmix.so.2
+# (and the OMPI runtime libs) resolve via ldconfig. Required for slurmd
+# step launch: mpi_pmix.so is built --with-pmix=/usr/mpi/gcc/openmpi
+# and dlopens libpmix.so.2 at MPI step bootstrap.
+printf '%s\n' "/usr/mpi/gcc/openmpi/lib" > /etc/ld.so.conf.d/200_doca-ompi.conf
 ldconfig
 EOR
 
@@ -281,8 +287,9 @@ EOR
 #
 # Parent is selected via FABRIC_BASE (base-efa or base-ib). Patches are applied
 # from patches/common/ then patches/${FABRIC}/ so EFA and IB paths receive the
-# correct debian/control and debian/rules hunks (e.g., EFA drops apt libpmix-dev
-# and points to /opt/amazon/pmix; IB keeps apt libpmix-dev for system PMIx).
+# correct debian/control and debian/rules hunks (EFA drops apt libpmix-dev and
+# points --with-pmix at /opt/amazon/pmix; IB drops apt libpmix-dev and points
+# --with-pmix at /usr/mpi/gcc/openmpi where DOCA's PMIx 3.2.5 lives).
 ARG FABRIC=ib
 ARG FABRIC_BASE=base-${FABRIC}
 FROM ${FABRIC_BASE} AS slurm-build
