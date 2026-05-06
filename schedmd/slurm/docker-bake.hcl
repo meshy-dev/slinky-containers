@@ -390,11 +390,16 @@ target "slurmd-cuda-ib" {
     FABRIC                = "ib"
     FABRIC_BASE           = "base-ib"
     OMPI_DEFAULT          = IB_OMPI_DEFAULT
-    MPI_HOME              = "/usr/mpi/gcc/openmpi"
+    # IB stack uses NVIDIA HPC-X SDK (OMPI 5 + PMIx 5) at /opt/mellanox/hpcx,
+    # see Dockerfile base-ib stage. EFA_HOME / OFI_HOME are unused on this
+    # fabric — kept as harmless /usr placeholders so the slurmd ENV
+    # PATH/LD_LIBRARY_PATH machinery (parameterised on all four args) stays
+    # symmetric with the EFA target without code-pathing on FABRIC.
+    MPI_HOME              = "/opt/mellanox/hpcx/ompi5"
     EFA_HOME              = "/usr"
-    PMIX_HOME             = "/usr"
+    PMIX_HOME             = "/opt/mellanox/hpcx/ompi5"
     OFI_HOME              = "/usr"
-    OPAL_PREFIX           = "/usr/mpi/gcc/openmpi"
+    OPAL_PREFIX           = "/opt/mellanox/hpcx/ompi5"
   }
   tags = compact([
     "${REGISTRY}/slurmd:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-ib",
@@ -422,11 +427,16 @@ target "login-cuda-ib" {
     FABRIC                = "ib"
     FABRIC_BASE           = "base-ib"
     OMPI_DEFAULT          = IB_OMPI_DEFAULT
-    MPI_HOME              = "/usr/mpi/gcc/openmpi"
+    # IB stack uses NVIDIA HPC-X SDK (OMPI 5 + PMIx 5) at /opt/mellanox/hpcx,
+    # see Dockerfile base-ib stage. EFA_HOME / OFI_HOME are unused on this
+    # fabric — kept as harmless /usr placeholders so the slurmd ENV
+    # PATH/LD_LIBRARY_PATH machinery (parameterised on all four args) stays
+    # symmetric with the EFA target without code-pathing on FABRIC.
+    MPI_HOME              = "/opt/mellanox/hpcx/ompi5"
     EFA_HOME              = "/usr"
-    PMIX_HOME             = "/usr"
+    PMIX_HOME             = "/opt/mellanox/hpcx/ompi5"
     OFI_HOME              = "/usr"
-    OPAL_PREFIX           = "/usr/mpi/gcc/openmpi"
+    OPAL_PREFIX           = "/opt/mellanox/hpcx/ompi5"
   }
   tags = compact([
     "${REGISTRY}/login:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-ib",
