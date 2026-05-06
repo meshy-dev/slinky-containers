@@ -338,7 +338,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
 mk-build-deps -ir --tool='apt-get -y -o Debug::pkgProblemResolver=yes --no-install-recommends' ${SLURM_DIR}/debian/control >/dev/null
-( cd ${SLURM_DIR} && debuild -b -uc -us >/dev/null )
+( cd ${SLURM_DIR} && debuild -b -uc -us )
 EOR
 
 ################################################################################
