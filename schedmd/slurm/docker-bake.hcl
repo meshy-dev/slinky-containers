@@ -387,6 +387,7 @@ target "slurmd-cuda-ib" {
     NCCL_CUDA_SUFFIX      = NCCL_CUDA_SUFFIX
     NVCC_GENCODE          = NVCC_GENCODE
     DEBIAN_FRONTEND       = DEBIAN_FRONTEND
+    DOCA_REPO_URL         = DOCA_REPO_URL
     FABRIC                = "ib"
     FABRIC_BASE           = "base-ib"
     OMPI_DEFAULT          = IB_OMPI_DEFAULT
@@ -424,6 +425,7 @@ target "login-cuda-ib" {
     NCCL_CUDA_SUFFIX      = NCCL_CUDA_SUFFIX
     NVCC_GENCODE          = NVCC_GENCODE
     DEBIAN_FRONTEND       = DEBIAN_FRONTEND
+    DOCA_REPO_URL         = DOCA_REPO_URL
     FABRIC                = "ib"
     FABRIC_BASE           = "base-ib"
     OMPI_DEFAULT          = IB_OMPI_DEFAULT
