@@ -480,14 +480,15 @@ USER root
 WORKDIR /tmp/
 
 # slurm-build .debs already live on FS via the fabric base -> slurm-build chain;
-# install only the subset dpkg consumes here. openssh-server is the only
-# non-slurm runtime dependency the forles slurmd pod needs (sshd binds the
-# pod's ssh port so operators can `kubectl exec`-free exec into compute nodes).
+# install only the subset dpkg consumes here. Runtime tools needed by the
+# forles slurmd pod are installed alongside them: sshd provides direct compute
+# node access, while SkyPilot uses rsync to synchronize workdirs and files.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
 apt-get -qq -y install --no-install-recommends --fix-broken \
   openssh-server \
+  rsync \
   /tmp/slurm-smd-client_[0-9]*.deb \
   /tmp/slurm-smd-client-dbgsym_[0-9]*.ddeb \
   /tmp/slurm-smd-dev_[0-9]*.deb \
