@@ -247,6 +247,7 @@ FROM base-cuda AS base-ib
 SHELL ["bash", "-c"]
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG DOCA_REPO_URL=https://linux.mellanox.com/public/repo/doca/latest/ubuntu24.04/x86_64/
 # HPC-X SDK pin. Update by querying the downloader API at
 #   https://downloaders.azurewebsites.net/downloaders/hpcx_downloader/helper.php
 # (see slinky-containers/docs/hpcx-pin.md if added later) and verifying SHA256.
@@ -259,9 +260,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
 mkdir -p -m 755 /etc/apt/keyrings
-curl -fsSL https://linux.mellanox.com/public/repo/doca/latest/ubuntu24.04/x86_64/GPG-KEY-Mellanox.pub | gpg --dearmor -o /etc/apt/keyrings/doca.gpg
+curl -fsSL -o /etc/apt/keyrings/doca.gpg "${DOCA_REPO_URL}doca_keyring.gpg"
 chmod 644 /etc/apt/keyrings/doca.gpg
-echo "deb [signed-by=/etc/apt/keyrings/doca.gpg arch=amd64] https://linux.mellanox.com/public/repo/doca/latest/ubuntu24.04/x86_64/ /" | tee /etc/apt/sources.list.d/doca.list
+echo "deb [signed-by=/etc/apt/keyrings/doca.gpg arch=amd64] ${DOCA_REPO_URL} /" | tee /etc/apt/sources.list.d/doca.list
 chmod 644 /etc/apt/sources.list.d/doca.list
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends \
@@ -480,14 +481,15 @@ USER root
 WORKDIR /tmp/
 
 # slurm-build .debs already live on FS via the fabric base -> slurm-build chain;
-# install only the subset dpkg consumes here. openssh-server is the only
-# non-slurm runtime dependency the forles slurmd pod needs (sshd binds the
-# pod's ssh port so operators can `kubectl exec`-free exec into compute nodes).
+# install only the subset dpkg consumes here. Runtime tools needed by the
+# forles slurmd pod are installed alongside them: sshd provides direct compute
+# node access, while SkyPilot uses rsync to synchronize workdirs and files.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 set -xeuo pipefail
 apt-get -qq -y install --no-install-recommends --fix-broken \
   openssh-server \
+  rsync \
   /tmp/slurm-smd-client_[0-9]*.deb \
   /tmp/slurm-smd-client-dbgsym_[0-9]*.ddeb \
   /tmp/slurm-smd-dev_[0-9]*.deb \
