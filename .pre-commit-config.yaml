@@ -32,18 +32,19 @@ repos:
       - id: end-of-file-fixer
       - id: detect-private-key
   - repo: https://github.com/executablebooks/mdformat
-    rev: 0.7.22
+    rev: 1.0.0
     hooks:
       - id: mdformat
         args:
           - --wrap=80
-        exclude: (\.chglog/.*|.github/ISSUE_TEMPLATE/.*)\.md
         additional_dependencies:
           - mdformat-toc
-          - mdformat-tables
+          - mdformat-gfm
           - mdformat-gfm-alerts
+          - mdformat-frontmatter
+        exclude: ^helm/.*/README\.md$
   - repo: https://github.com/codespell-project/codespell
-    rev: v2.4.1
+    rev: v2.4.2
     hooks:
       - id: codespell
         args:
@@ -74,6 +75,13 @@ repos:
           - --severity=warning
   - repo: local
     hooks:
+      - id: make-validate-bake
+        name: Make Validate Bake
+        entry: make validate-bake
+        language: system
+        pass_filenames: false
+        require_serial: true
+        files: ^(Makefile|schedmd/slurm/(docker-bake\.hcl|[^/]+/[^/]+/slurm\.hcl))$
       - id: make-generate-docs
         name: Make Generate Docs
         entry: make generate-docs

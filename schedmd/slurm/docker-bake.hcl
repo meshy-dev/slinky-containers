@@ -17,7 +17,7 @@ variable "SUFFIX" {}
 
 variable "PARENT_IMAGE"           { default = "ubuntu:24.04" }
 variable "CUDA_TOOLKIT_VERSION"   { default = "13-2" }
-variable "SLURM_VERSION_CUDA_EFA" { default = "25.11.5" }
+variable "SLURM_VERSION_CUDA_EFA" { default = "25.11.8" }
 variable "SLURM_DEB_PATCH_REV"    { default = "meshy1" }
 variable "EFA_INSTALLER_VERSION"  { default = "1.48.0" }
 variable "EFA_INSTALLER_FLAGS"    { default = "-y --skip-kmod --skip-limit-conf --no-verify --mpi=openmpi5" }
@@ -32,26 +32,33 @@ variable "IB_OMPI_DEFAULT"        { default = "openmpi" }
 # GHA injects GITHUB_SHA; local builds get an empty string (tag dropped by compact()).
 variable "SHA" { default = "" }
 
+# "false" drops the floating version tags (25.11-cuda13.2-ubuntu24.04-efa, ...)
+# from the cuda targets so only the immutable ${SHA}* tags are pushed. The CI
+# workflow sets it for non-main refs: deployments' build-login.yaml builds FROM
+# the floating login:*-efa/-ib tags, so a branch build must not move them.
+variable "FLOATING_TAGS" { default = "true" }
+
 ################################################################################
 
 slurm_version = "master"
-slurm_version_micro = "1"
 slurm_dir = slurm_version(slurm_version)
 linux_flavor = "rockylinux9"
 context = "${slurm_dir}/${linux_flavor}"
 
 ################################################################################
 
+_slurm_regex_version = "^(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+)(?:-(?<rev>.+))?$"
+
 function "slurm_semantic_version" {
   params = [version]
-  result = regex("^(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+)(?:-(?<rev>.+))?$", "${version}")
+  result = regex(_slurm_regex_version, version)
 }
 
 function "slurm_version" {
   params = [version]
   result = (
-    length(regexall("^(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+)(?:-(?<rev>.+))?$", "${version}")) > 0
-      ? format("%s.%s", "${slurm_semantic_version("${version}")["major"]}", "${slurm_semantic_version("${version}")["minor"]}")
+    length(regexall(_slurm_regex_version, version)) > 0
+      ? format("%s.%s", slurm_semantic_version(version)["major"], slurm_semantic_version(version)["minor"])
       : version
   )
 }
@@ -61,12 +68,32 @@ function "format_tag" {
   result = format("%s:%s", join("/", compact([registry, stage])), join("-", compact([version, flavor, suffix])))
 }
 
+# GitHub archive ref derived from SLURM_VERSION.
+# Micro comes from the -<micro> suffix when present; otherwise defaults to 1.
+#   VERSION       -> ARCHIVE
+#   master        -> master
+#   26.05.1       -> slurm-26-05-1-1
+#   26.05.0-2     -> slurm-26-05-0-2
+#   26.05.0-0rc1  -> slurm-26-05-0-0rc1
+function "slurm_version_archive" {
+  params = [version]
+  result = (
+    length(regexall(_slurm_regex_version, version)) > 0
+      ? format("slurm-%s-%s-%s-%s",
+          slurm_semantic_version(version)["major"],
+          slurm_semantic_version(version)["minor"],
+          slurm_semantic_version(version)["patch"],
+          coalesce(try(slurm_semantic_version(version)["rev"], null), "1"))
+      : version
+  )
+}
+
 ################################################################################
 
 target "_slurm" {
   args = {
     SLURM_VERSION = slurm_version
-    SLURM_VERSION_MICRO = slurm_version_micro
+    SLURM_VERSION_ARCHIVE = slurm_version_archive(slurm_version)
   }
   labels = {
     # Ref: https://github.com/opencontainers/image-spec/blob/v1.0/annotations.md
@@ -313,6 +340,7 @@ target "slurmd-cuda-efa" {
     PARENT_IMAGE          = PARENT_IMAGE
     CUDA_TOOLKIT_VERSION  = CUDA_TOOLKIT_VERSION
     SLURM_VERSION         = SLURM_VERSION_CUDA_EFA
+    SLURM_VERSION_ARCHIVE = slurm_version_archive(SLURM_VERSION_CUDA_EFA)
     SLURM_DEB_PATCH_REV   = SLURM_DEB_PATCH_REV
     EFA_INSTALLER_VERSION = EFA_INSTALLER_VERSION
     EFA_INSTALLER_FLAGS   = EFA_INSTALLER_FLAGS
@@ -329,8 +357,8 @@ target "slurmd-cuda-efa" {
     OPAL_PREFIX           = "/opt/amazon/openmpi5"
   }
   tags = compact([
-    "${REGISTRY}/slurmd:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-efa",
-    "${REGISTRY}/slurmd:25.11-cuda13.2-ubuntu24.04-efa",
+    FLOATING_TAGS == "true" ? "${REGISTRY}/slurmd:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-efa" : "",
+    FLOATING_TAGS == "true" ? "${REGISTRY}/slurmd:25.11-cuda13.2-ubuntu24.04-efa" : "",
     SHA != "" ? "${REGISTRY}/slurmd:${SHA}" : "",
   ])
 }
@@ -348,6 +376,7 @@ target "login-cuda-efa" {
     PARENT_IMAGE          = PARENT_IMAGE
     CUDA_TOOLKIT_VERSION  = CUDA_TOOLKIT_VERSION
     SLURM_VERSION         = SLURM_VERSION_CUDA_EFA
+    SLURM_VERSION_ARCHIVE = slurm_version_archive(SLURM_VERSION_CUDA_EFA)
     SLURM_DEB_PATCH_REV   = SLURM_DEB_PATCH_REV
     EFA_INSTALLER_VERSION = EFA_INSTALLER_VERSION
     EFA_INSTALLER_FLAGS   = EFA_INSTALLER_FLAGS
@@ -364,8 +393,9 @@ target "login-cuda-efa" {
     OPAL_PREFIX           = "/opt/amazon/openmpi5"
   }
   tags = compact([
-    "${REGISTRY}/login:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-efa",
-    "${REGISTRY}/login:25.11-cuda13.2-ubuntu24.04-efa",
+    FLOATING_TAGS == "true" ? "${REGISTRY}/login:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-efa" : "",
+    FLOATING_TAGS == "true" ? "${REGISTRY}/login:25.11-cuda13.2-ubuntu24.04-efa" : "",
+    SHA != "" ? "${REGISTRY}/login:${SHA}-efa" : "",
   ])
 }
 
@@ -383,6 +413,7 @@ target "slurmd-cuda-ib" {
     PARENT_IMAGE          = PARENT_IMAGE
     CUDA_TOOLKIT_VERSION  = CUDA_TOOLKIT_VERSION
     SLURM_VERSION         = SLURM_VERSION_CUDA_EFA
+    SLURM_VERSION_ARCHIVE = slurm_version_archive(SLURM_VERSION_CUDA_EFA)
     SLURM_DEB_PATCH_REV   = SLURM_DEB_PATCH_REV
     NCCL_CUDA_SUFFIX      = NCCL_CUDA_SUFFIX
     NVCC_GENCODE          = NVCC_GENCODE
@@ -403,8 +434,9 @@ target "slurmd-cuda-ib" {
     OPAL_PREFIX           = "/opt/mellanox/hpcx/ompi5"
   }
   tags = compact([
-    "${REGISTRY}/slurmd:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-ib",
-    "${REGISTRY}/slurmd:25.11-cuda13.2-ubuntu24.04-ib",
+    FLOATING_TAGS == "true" ? "${REGISTRY}/slurmd:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-ib" : "",
+    FLOATING_TAGS == "true" ? "${REGISTRY}/slurmd:25.11-cuda13.2-ubuntu24.04-ib" : "",
+    SHA != "" ? "${REGISTRY}/slurmd:${SHA}-ib" : "",
   ])
 }
 
@@ -421,6 +453,7 @@ target "login-cuda-ib" {
     PARENT_IMAGE          = PARENT_IMAGE
     CUDA_TOOLKIT_VERSION  = CUDA_TOOLKIT_VERSION
     SLURM_VERSION         = SLURM_VERSION_CUDA_EFA
+    SLURM_VERSION_ARCHIVE = slurm_version_archive(SLURM_VERSION_CUDA_EFA)
     SLURM_DEB_PATCH_REV   = SLURM_DEB_PATCH_REV
     NCCL_CUDA_SUFFIX      = NCCL_CUDA_SUFFIX
     NVCC_GENCODE          = NVCC_GENCODE
@@ -441,8 +474,9 @@ target "login-cuda-ib" {
     OPAL_PREFIX           = "/opt/mellanox/hpcx/ompi5"
   }
   tags = compact([
-    "${REGISTRY}/login:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-ib",
-    "${REGISTRY}/login:25.11-cuda13.2-ubuntu24.04-ib",
+    FLOATING_TAGS == "true" ? "${REGISTRY}/login:${SLURM_VERSION_CUDA_EFA}-cuda13.2-ubuntu24.04-ib" : "",
+    FLOATING_TAGS == "true" ? "${REGISTRY}/login:25.11-cuda13.2-ubuntu24.04-ib" : "",
+    SHA != "" ? "${REGISTRY}/login:${SHA}-ib" : "",
   ])
 }
 
@@ -531,7 +565,7 @@ variable "GIT_BRANCH" {
 function "git_branch" {
   params = [version]
   result = (
-    length(regexall("^(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+)(?:-(?<rev>.+))?$", "${version}")) > 0
+    length(regexall("^(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+)(?:-(?<rev>.+))?$", version)) > 0
       ? format("slurm-%s", slurm_version(version))
       : version
   )
