@@ -10,12 +10,13 @@ Forwarded: not-needed
 Last-Update: 2026-11-03
 --- a/debian/changelog
 +++ b/debian/changelog
-@@ -1,3 +1,10 @@
+@@ -1,3 +1,11 @@
 +slurm-smd (25.11.8-1meshy1) UNRELEASED; urgency=medium
 +
 +  * Add --with-nvml=/usr/local/cuda and --with-pmix=/opt/amazon/pmix
 +  * Add cuda-nvml-dev-13-2 to Build-Depends; drop apt libpmix-dev.
-++
++  * Build against libhwloc 2.10.0-1build1+meshy1 (cgroup path fix).
++
 + -- meshy-dev <dev@meshy.ai>  Tue, 03 Nov 2026 00:00:00 +0000
 +
  slurm-smd (25.11.8-1) UNRELEASED; urgency=medium
