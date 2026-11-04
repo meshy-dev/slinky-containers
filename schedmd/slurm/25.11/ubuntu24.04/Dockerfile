@@ -21,6 +21,10 @@
 # NCCL_CUDA_SUFFIX        apt version suffix for libnccl2/libnccl-dev (e.g. cuda13.2).
 # NVCC_GENCODE            NVCC gencode flags passed through to NCCL / plugin builds.
 # DEBIAN_FRONTEND         standard apt noninteractive.
+# HWLOC_COMMIT            meshy-dev/hwloc commit (full SHA) overlaid on Ubuntu's
+#                         hwloc source package; see the hwloc-build stage.
+# HWLOC_UBUNTU_VERSION    Ubuntu source package the fix is rebuilt from.
+# HWLOC_DEB_VERSION       Version stamped on the rebuilt hwloc .debs.
 ################################################################################
 
 ARG PARENT_IMAGE=ubuntu:24.04
@@ -36,6 +40,12 @@ ARG NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,
 ARG SLURM_DIR=slurm
 ARG FABRIC=ib
 ARG FABRIC_BASE=base-${FABRIC}
+# fix/cgroup-long-paths-v2.10: hwloc-2.10.0 + "linux: avoid truncating cgroup
+# paths" (backport of eb870030c). Bump HWLOC_COMMIT and the ADD --checksum in
+# the hwloc-build stage together.
+ARG HWLOC_COMMIT=50ab3ff0342be7502c22b9c4f40b1d0e170f4e7c
+ARG HWLOC_UBUNTU_VERSION=2.10.0-1build1
+ARG HWLOC_DEB_VERSION=2.10.0-1build1+meshy1
 
 ################################################################################
 # slurm-src — alpine sidecar: fetch + extract SchedMD slurm source tarball.
@@ -55,6 +65,76 @@ RUN \
   mkdir -p ${SLURM_DIR} && \
   tar --strip-components=1 -zxvf ${SLURM_TAR} -C ${SLURM_DIR} && \
   rm ${SLURM_TAR}
+
+################################################################################
+# hwloc-build — Ubuntu 24.04's own hwloc 2.10.0 source package, rebuilt with
+# the meshy-dev cgroup path fix.
+#
+# Stock hwloc reads /proc/<pid>/cpuset into a 128-byte buffer (and cpuset
+# filenames into 256 bytes). slurmd in a Kubernetes pod with the host cgroup
+# namespace sits at a ~200-byte cgroup path, so hwloc silently fell back to
+# "every CPU is allowed". The fix reads those files whole.
+#
+# The orig tarball and debian/ come from Ubuntu (apt verifies them against the
+# signed Sources index). The files that the pinned meshy-dev/hwloc commit
+# changes or adds relative to the hwloc-2.10.0 tag (topology-linux.c and the
+# allowed-resource tests) are copied over it, and dh_autoreconf regenerates the
+# build system. Only those files: the git tree's VERSION etc. differ from the
+# release tarball and would make hwloc report itself as 2.10.0rc3-git. Packaging, configure flags, soname
+# (libhwloc.so.15) and ABI are Ubuntu's; only the version gains +meshy1, which
+# sorts above 2.10.0-1build1 so these .debs upgrade the distro ones.
+FROM ${PARENT_IMAGE} AS hwloc-build
+
+SHELL ["bash", "-c"]
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG HWLOC_COMMIT
+ARG HWLOC_UBUNTU_VERSION
+ARG HWLOC_DEB_VERSION
+
+USER root
+WORKDIR /tmp/hwloc/
+
+ADD --checksum=sha256:5de2a21f2d7e378be34a9f4aee4e994f367b1901342d372679d927b6638effdc \
+  https://github.com/meshy-dev/hwloc/archive/${HWLOC_COMMIT}.tar.gz meshy-hwloc.tar.gz
+# hwloc-2.10.0 tag (d9444df44), the base of HWLOC_COMMIT.
+ADD --checksum=sha256:faa117fcc5491dac08b4cfd96ba2900457680e57223badde5bafc24a98908783 \
+  https://github.com/meshy-dev/hwloc/archive/d9444df44c71f40667d350b42dd3c69207fd4ae0.tar.gz hwloc-2.10.0.tar.gz
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
+set -xeuo pipefail
+sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+apt-get -qq update
+apt-get -qq -y install --no-install-recommends \
+  build-essential devscripts equivs fakeroot dpkg-dev xz-utils bzip2 ca-certificates
+apt-get -qq source --download-only "hwloc=${HWLOC_UBUNTU_VERSION}"
+mkdir src tag fix
+tar -xjf hwloc_*.orig.tar.bz2 -C src --strip-components=1
+tar -xzf hwloc-2.10.0.tar.gz -C tag --strip-components=1
+tar -xzf meshy-hwloc.tar.gz -C fix --strip-components=1
+( cd fix && find . -type f ) | sort | while read -r f; do
+  if ! cmp -s "fix/$f" "tag/$f"; then
+    echo "overlay: $f"
+    mkdir -p "src/$(dirname "$f")"
+    cp "fix/$f" "src/$f"
+  fi
+done
+tar -xJf "hwloc_${HWLOC_UBUNTU_VERSION}.debian.tar.xz" -C src
+cd src
+DEBEMAIL=dev@meshy.ai DEBFULLNAME=meshy-dev dch --newversion "${HWLOC_DEB_VERSION}" \
+  --distribution noble --force-distribution \
+  "Rebuild from meshy-dev/hwloc@${HWLOC_COMMIT}: read /proc/<pid>/cpuset and /proc/<pid>/cgroup whole so long cgroup paths are not truncated."
+apt-get -qq -y build-dep -P nodoc,nocheck ./ >/dev/null
+DEB_BUILD_PROFILES="nodoc nocheck" DEB_BUILD_OPTIONS="nodoc nocheck parallel=$(nproc)" \
+  dpkg-buildpackage -b -uc -us >/dev/null
+# The allowed-resource tests cover the fix (long cpuset/cgroup paths); run just
+# those against the tree that was packaged.
+make -C tests/hwloc/linux/allowed check
+mkdir -p /tmp/hwloc-debs
+mv ../*.deb /tmp/hwloc-debs/
+ls -l /tmp/hwloc-debs/
+EOR
 
 ################################################################################
 # base — plain Ubuntu 24.04 + SchedMD build/runtime userland.
@@ -131,6 +211,35 @@ EOR
 ENV LANG=en_US.UTF-8
 ENV LANGUAGE=en_US:en
 ENV LC_ALL=en_US.UTF-8
+
+# Replace the distro hwloc with the hwloc-build .debs before anything links
+# against it: slurm-build compiles Slurm against these headers/libhwloc.so.15,
+# and every runtime stage inherits them. Upgrade exactly the hwloc packages the
+# baseline installed (plus the library and headers), then hold them so a later
+# `apt-get upgrade` cannot swap a stock build back in.
+COPY --from=hwloc-build /tmp/hwloc-debs/ /tmp/hwloc-debs/
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+  --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
+set -xeuo pipefail
+pkgs=(libhwloc15 libhwloc-dev)
+for deb in /tmp/hwloc-debs/*.deb; do
+  name="$(dpkg-deb -f "$deb" Package)"
+  if dpkg -s "$name" >/dev/null 2>&1; then
+    pkgs+=("$name")
+  fi
+done
+mapfile -t pkgs < <(printf '%s\n' "${pkgs[@]}" | sort -u)
+debs=()
+for name in "${pkgs[@]}"; do
+  debs+=(/tmp/hwloc-debs/"${name}"_*.deb)
+done
+apt-get -qq -y install --no-install-recommends "${debs[@]}"
+apt-mark hold "${pkgs[@]}"
+dpkg-query -W "${pkgs[@]}"
+# Fail the build if anything hwloc is still a stock build.
+! dpkg-query -W -f '${Package} ${Version}\n' 'libhwloc*' 'hwloc*' 2>/dev/null | grep -v -- '+meshy' | grep -v -E '^\S+ $'
+rm -r /tmp/hwloc-debs
+EOR
 
 ################################################################################
 # base-cuda — CUDA toolkit + NCCL from NVIDIA network repo (driver-free).
