@@ -15,10 +15,12 @@
     - [Environment](#environment-2)
   - [slurmd](#slurmd)
     - [Environment](#environment-3)
+    - [Miscellaneous](#miscellaneous)
   - [sackd](#sackd)
     - [Environment](#environment-4)
   - [login](#login)
     - [Environment](#environment-5)
+    - [Miscellaneous](#miscellaneous-1)
 
 <!-- mdformat-toc end -->
 
@@ -31,7 +33,7 @@ This document explains how to use Slurm images.
 Pull a [slurmctld] image.
 
 ```sh
-docker pull ghcr.io/slinkyproject/slurmctld:25.11-ubuntu24.04
+docker pull ghcr.io/slinkyproject/slurmctld:26.05-ubuntu26.04
 ```
 
 ### Environment
@@ -39,13 +41,29 @@ docker pull ghcr.io/slinkyproject/slurmctld:25.11-ubuntu24.04
 | Variable          | Description                      |
 | ----------------- | -------------------------------- |
 | SLURMCTLD_OPTIONS | Arguments passed to `slurmctld`. |
+| SSSD_OPTIONS      | Arguments passed to `sssd`.      |
+
+The slurmctld image bundles SSSD as an NSS source so `slurmctld` can resolve
+directory users and groups (e.g. reservation and partition access control lists)
+via `getpwnam`/`getgrnam`.
+
+To use SSSD:
+
+1. Mount `sssd.conf` at `/etc/sssd/sssd.conf` (owned by `root`, mode `0600`).
+1. Start the container as root. `sssd` requires root. If a Kubernetes
+   securityContext forces a non-root UID (for example `runAsNonRoot: true` /
+   `runAsUser: 401`), override it when enabling SSSD.
+
+Without a usable `sssd.conf` (or without root), supervisord will mark `sssd`
+FATAL after retries. That is expected; `slurmctld` continues and resolves only
+local `/etc/passwd` entries.
 
 ## slurmdbd
 
 Pull a [slurmdbd] image.
 
 ```sh
-docker pull ghcr.io/slinkyproject/slurmdbd:25.11-ubuntu24.04
+docker pull ghcr.io/slinkyproject/slurmdbd:26.05-ubuntu26.04
 ```
 
 ### Environment
@@ -59,7 +77,7 @@ docker pull ghcr.io/slinkyproject/slurmdbd:25.11-ubuntu24.04
 Pull a [slurmrestd] image.
 
 ```sh
-docker pull ghcr.io/slinkyproject/slurmrestd:25.11-ubuntu24.04
+docker pull ghcr.io/slinkyproject/slurmrestd:26.05-ubuntu26.04
 ```
 
 ### Environment
@@ -73,7 +91,7 @@ docker pull ghcr.io/slinkyproject/slurmrestd:25.11-ubuntu24.04
 Pull a [slurmd] image.
 
 ```sh
-docker pull ghcr.io/slinkyproject/slurmd:25.11-ubuntu24.04
+docker pull ghcr.io/slinkyproject/slurmd:26.05-ubuntu26.04
 ```
 
 ### Environment
@@ -88,12 +106,18 @@ docker pull ghcr.io/slinkyproject/slurmd:25.11-ubuntu24.04
 | POD_MEMORY              | Used to calculate slurmd `MemSpecLimit`.     |
 | POD_TOPOLOGY            | Used for slurmd dynamic topology.            |
 
+### Miscellaneous
+
+The image `entrypoint.sh` script will glob and run all executable files in
+`/usr/local/entrypoint.d/` before starting supervisord. `entrypoint.d/` can be
+used to extend the `entrypoint.sh` without direct modification.
+
 ## sackd
 
 Pull a [sackd] image.
 
 ```sh
-docker pull ghcr.io/slinkyproject/sackd:25.11-ubuntu24.04
+docker pull ghcr.io/slinkyproject/sackd:26.05-ubuntu26.04
 ```
 
 ### Environment
@@ -107,7 +131,7 @@ docker pull ghcr.io/slinkyproject/sackd:25.11-ubuntu24.04
 Pull a [login] image.
 
 ```sh
-docker pull ghcr.io/slinkyproject/login:25.11-ubuntu24.04
+docker pull ghcr.io/slinkyproject/login:26.05-ubuntu26.04
 ```
 
 ### Environment
@@ -117,6 +141,12 @@ docker pull ghcr.io/slinkyproject/login:25.11-ubuntu24.04
 | SACKD_OPTIONS | Arguments passed to `sackd`. |
 | SSHD_OPTIONS  | Arguments passed to `sshd`.  |
 | SSSD_OPTIONS  | Arguments passed to `sssd`.  |
+
+### Miscellaneous
+
+The image `entrypoint.sh` script will glob and run all executable files in
+`/usr/local/entrypoint.d/` before starting supervisord. `entrypoint.d/` can be
+used to extend the `entrypoint.sh` without direct modification.
 
 <!-- Links -->
 

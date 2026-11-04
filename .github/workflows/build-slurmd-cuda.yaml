@@ -1,6 +1,11 @@
 ---
 # Builds and pushes ghcr.io/meshy-dev/slinky-containers/slurmd:*cuda13.2*
 # for both EFA and IB fabric variants via matrix strategy.
+#
+# main pushes the floating version tags plus ${SHA}-suffixed ones. A
+# workflow_dispatch on any other ref builds only the cuda targets and pushes
+# only the immutable ${SHA}* tags (FLOATING_TAGS=false), so testing a branch
+# image never moves a tag that something else builds FROM or pulls.
 name: build-slurmd-cuda
 
 on:
@@ -24,8 +29,10 @@ jobs:
         include:
           - fabric: efa
             target: "slurmd-cuda-efa login login-cuda-efa"
+            branch_target: "slurmd-cuda-efa login-cuda-efa"
           - fabric: ib
             target: "slurmd-cuda-ib login-cuda-ib"
+            branch_target: "slurmd-cuda-ib login-cuda-ib"
     steps:
       - uses: actions/checkout@v4
 
@@ -42,10 +49,25 @@ jobs:
         env:
           BAKE_IMPORTS: schedmd/slurm/25.11/ubuntu24.04/slurm.hcl
           SHA: ${{ github.sha }}
+          FLOATING_TAGS: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
+          TARGETS: ${{ github.ref == 'refs/heads/main' && matrix.target || matrix.branch_target }}
         working-directory: schedmd/slurm
         run: |
+          # shellcheck disable=SC2086
           docker buildx bake \
             -f docker-bake.hcl \
             -f 25.11/ubuntu24.04/slurm.hcl \
-            ${{ matrix.target }} \
+            ${TARGETS} \
+            --metadata-file "${RUNNER_TEMP}/bake-metadata.json" \
             --push
+
+      - name: Image digests
+        if: always()
+        run: |
+          f="${RUNNER_TEMP}/bake-metadata.json"
+          [ -f "$f" ] || exit 0
+          {
+            echo "### ${{ matrix.fabric }} images (${GITHUB_REF_NAME} @ ${GITHUB_SHA})"
+            echo
+            jq -r 'to_entries[] | select(.value["containerimage.digest"]) | "- \(.key): `\(.value["image.name"])` digest `\(.value["containerimage.digest"])`"' "$f"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
