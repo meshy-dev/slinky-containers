@@ -1,6 +1,8 @@
 ---
 # Builds and pushes ghcr.io/meshy-dev/slinky-containers/slurmd:*cuda13.2*
-# for both EFA and IB fabric variants via matrix strategy.
+# for both EFA and IB fabric variants via matrix strategy. The EFA job also
+# builds the fabric-independent control plane (slurmctld-meshy,
+# slurmrestd-meshy) from the same patched .debs, used by both clusters.
 #
 # main pushes the floating version tags plus ${SHA}-suffixed ones. A
 # workflow_dispatch on any other ref builds only the cuda targets and pushes
@@ -28,8 +30,8 @@ jobs:
       matrix:
         include:
           - fabric: efa
-            target: "slurmd-cuda-efa login login-cuda-efa"
-            branch_target: "slurmd-cuda-efa login-cuda-efa"
+            target: "slurmd-cuda-efa login login-cuda-efa slurmctld-meshy slurmrestd-meshy"
+            branch_target: "slurmd-cuda-efa login-cuda-efa slurmctld-meshy slurmrestd-meshy"
           - fabric: ib
             target: "slurmd-cuda-ib login-cuda-ib"
             branch_target: "slurmd-cuda-ib login-cuda-ib"

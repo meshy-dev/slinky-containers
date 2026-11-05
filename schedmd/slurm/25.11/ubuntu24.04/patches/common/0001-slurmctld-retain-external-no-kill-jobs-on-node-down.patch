@@ -1,0 +1,343 @@
+Description: slurmctld: retain external --no-kill jobs when their node goes DOWN
+ A running external job (EXTERNAL_JOB, as slurm-bridge submits) with
+ kill_on_node_fail=0 keeps its whole allocation (nodes, CPUs, memory, GRES)
+ when its node goes DOWN, instead of failing with NODE_FAIL. Covers explicit
+ state=down, SlurmdTimeout and "unexpectedly rebooted"; FUTURE and forced
+ power-down still kill. The DOWN node takes no new work, returns ALLOCATED
+ (resume / ReturnToService), refuses deletion while it holds the job (Slinky
+ 1.1.0's preStop runs "state=down && scontrol delete"), and keeps the job
+ across a slurmctld restart. libslurm keeps reporting such a node DOWN instead
+ of inferring MIXED. Hetjobs and jobs that did not opt in are unchanged.
+ .
+ Touches slurmctld and libslurm (src/api), so it matters for the slurmctld,
+ slurmrestd, login and slurmd images. Source: meshy/retain-external-on-node-down
+ on a SchedMD/slurm checkout at tag slurm-25-11-8-1. Regenerate on every
+ SLURM_VERSION bump.
+Author: Charlie Getzen <charliegetzen@meshy.ai>
+Forwarded: no
+Last-Update: 2026-11-05
+diff --git a/src/api/node_info.c b/src/api/node_info.c
+index d29a175..4c4c8d4 100644
+--- a/src/api/node_info.c
++++ b/src/api/node_info.c
+@@ -517,6 +517,14 @@ static void _set_node_mixed_op(node_info_t *node_ptr)
+ 	if (!node_ptr->name)
+ 		return;
+ 
++	/*
++	 * A DOWN node can still hold jobs that kept their allocation (external
++	 * jobs with kill_on_node_fail=0). Keep reporting it DOWN, as the
++	 * controller's statistics do.
++	 */
++	if (IS_NODE_DOWN(node_ptr) || IS_NODE_FUTURE(node_ptr))
++		return;
++
+ 	idle_cpus = node_ptr->cpus_efctv - node_ptr->alloc_cpus;
+ 
+ 	if (idle_cpus && (idle_cpus < node_ptr->cpus_efctv))
+diff --git a/src/slurmctld/job_mgr.c b/src/slurmctld/job_mgr.c
+index d87713a..11ba74e 100644
+--- a/src/slurmctld/job_mgr.c
++++ b/src/slurmctld/job_mgr.c
+@@ -254,6 +254,7 @@ typedef struct {
+ 	time_t now;
+ 	part_record_t *part_ptr;
+ 	bool requeue_on_resume_failure;
++	bool retain_on_node_down;
+ } foreach_kill_job_by_t;
+ 
+ typedef struct {
+@@ -2939,6 +2940,21 @@ static bool _het_job_on_node(job_record_t *job_ptr, int node_inx)
+ 			       _find_het_job_on_node, &node_inx);
+ }
+ 
++extern bool job_retain_alloc_on_node_fail(job_record_t *job_ptr)
++{
++	/*
++	 * Hetjobs are left out: a node failure fails all their components
++	 * together (see _het_job_on_node()), and neither sbatch nor slurmrestd
++	 * accepts an external hetjob.
++	 */
++	return ((job_ptr->bit_flags & EXTERNAL_JOB) &&
++		(job_ptr->kill_on_node_fail == 0) &&
++		!job_ptr->het_job_id &&
++		IS_JOB_RUNNING(job_ptr) &&
++		!IS_JOB_CONFIGURING(job_ptr) &&
++		!IS_JOB_COMPLETING(job_ptr));
++}
++
+ static int _foreach_kill_running_job_by_node(void *x, void *arg)
+ {
+ 	job_record_t *job_ptr = x;
+@@ -2982,6 +2998,17 @@ static int _foreach_kill_running_job_by_node(void *x, void *arg)
+ 			error("Node %s comp_job_cnt underflow, %pJ",
+ 			      node_ptr->name, job_ptr);
+ 		}
++	} else if (foreach_kill_job_by->retain_on_node_down &&
++		   job_retain_alloc_on_node_fail(job_ptr)) {
++		/*
++		 * slurmd neither launched nor tracks this job, so it may still
++		 * be running. Keep the whole allocation, including this node,
++		 * until the job is cancelled or reaches its time limit. The
++		 * node is DOWN, so nothing new is scheduled on it meanwhile.
++		 */
++		info("Retaining %pJ allocation on DOWN node %s (external job with kill_on_node_fail=0)",
++		     job_ptr, node_ptr->name);
++		make_node_retained(node_ptr, job_ptr);
+ 	} else if (IS_JOB_RUNNING(job_ptr) || suspended) {
+ 		foreach_kill_job_by->kill_job_cnt++;
+ 		if ((job_ptr->details) &&
+@@ -3091,7 +3118,8 @@ static int _foreach_kill_running_job_by_node(void *x, void *arg)
+ 	return 0;
+ }
+ 
+-extern int kill_running_job_by_node_ptr(node_record_t *node_ptr)
++static int _kill_running_job_by_node_ptr(node_record_t *node_ptr,
++					 bool retain_on_node_down)
+ {
+ 	static time_t sched_update = 0;
+ 	static bool requeue_on_resume_failure = false;
+@@ -3100,6 +3128,7 @@ extern int kill_running_job_by_node_ptr(node_record_t *node_ptr)
+ 	foreach_kill_job_by_t foreach_kill_job_by = {
+ 		.node_ptr = node_ptr,
+ 		.now = time(NULL),
++		.retain_on_node_down = retain_on_node_down,
+ 	};
+ 
+ 	if (sched_update != slurm_conf.last_update) {
+@@ -3135,6 +3164,18 @@ extern int kill_running_job_by_node_ptr(node_record_t *node_ptr)
+ 	return foreach_kill_job_by.kill_job_cnt;
+ }
+ 
++extern int kill_running_job_by_node_ptr(node_record_t *node_ptr)
++{
++	return _kill_running_job_by_node_ptr(node_ptr, false);
++}
++
++extern int kill_running_job_by_down_node_ptr(node_record_t *node_ptr)
++{
++	xassert(!node_ptr || IS_NODE_DOWN(node_ptr));
++
++	return _kill_running_job_by_node_ptr(node_ptr, true);
++}
++
+ /* Remove one node from a job's allocation */
+ extern void excise_node_from_job(job_record_t *job_ptr,
+ 				 node_record_t *node_ptr)
+diff --git a/src/slurmctld/node_mgr.c b/src/slurmctld/node_mgr.c
+index 837944a..094f4de 100644
+--- a/src/slurmctld/node_mgr.c
++++ b/src/slurmctld/node_mgr.c
+@@ -2076,7 +2076,11 @@ int update_node(update_node_msg_t *update_node_msg, uid_t auth_uid)
+ 				/* We must set node DOWN before killing
+ 				 * its jobs */
+ 				_make_node_down(node_ptr, now);
+-				kill_running_job_by_node_ptr(node_ptr);
++				if (state_val == NODE_STATE_DOWN)
++					kill_running_job_by_down_node_ptr(
++						node_ptr);
++				else
++					kill_running_job_by_node_ptr(node_ptr);
+ 				if (state_val == NODE_STATE_FUTURE) {
+ 					bool dyn_norm_node = false;
+ 					if (IS_NODE_DYNAMIC_FUTURE(node_ptr)) {
+@@ -2108,6 +2112,15 @@ int update_node(update_node_msg_t *update_node_msg, uid_t auth_uid)
+ 						node_ptr->reason_uid);
+ 				}
+ 			} else if (state_val == NODE_STATE_IDLE) {
++				/*
++				 * A DOWN node can still hold jobs that kept
++				 * their allocation when it went DOWN (see
++				 * job_retain_alloc_on_node_fail()). It returns
++				 * to service ALLOCATED, not IDLE.
++				 */
++				bool retained = (IS_NODE_DOWN(node_ptr) &&
++						 node_ptr->run_job_cnt);
++
+ 				/* assume they want to clear DRAIN and
+ 				 * FAIL flags too */
+ 				if (IS_NODE_DOWN(node_ptr)) {
+@@ -2131,12 +2144,19 @@ int update_node(update_node_msg_t *update_node_msg, uid_t auth_uid)
+ 				if (!IS_NODE_NO_RESPOND(node_ptr) ||
+ 				     IS_NODE_POWERED_DOWN(node_ptr))
+ 					make_node_avail(node_ptr);
+-				bit_set (idle_node_bitmap, node_ptr->index);
+ 				bit_set (up_node_bitmap, node_ptr->index);
+-				if (IS_NODE_POWERED_DOWN(node_ptr))
+-					node_ptr->last_busy = 0;
+-				else
+-					node_ptr->last_busy = now;
++				if (retained) {
++					bit_clear(idle_node_bitmap,
++						  node_ptr->index);
++					state_val = NODE_STATE_ALLOCATED;
++				} else {
++					bit_set(idle_node_bitmap,
++						node_ptr->index);
++					if (IS_NODE_POWERED_DOWN(node_ptr))
++						node_ptr->last_busy = 0;
++					else
++						node_ptr->last_busy = now;
++				}
+ 			} else if (state_val == NODE_STATE_ALLOCATED) {
+ 				if (!IS_NODE_DRAIN(node_ptr) &&
+ 				    !IS_NODE_FAIL(node_ptr)  &&
+@@ -3800,9 +3820,10 @@ extern int validate_node_specs(slurm_msg_t *slurm_msg, bool *newly_up)
+ 			     __func__, reg_msg->node_name, node_ptr->boot_time,
+ 			     node_ptr->last_response);
+ 			_make_node_down(node_ptr, now);
+-			kill_running_job_by_node_ptr(node_ptr);
++			kill_running_job_by_down_node_ptr(node_ptr);
+ 			last_node_update = now;
+-			reg_msg->job_count = 0;
++			/* Only jobs that kept their allocation remain */
++			reg_msg->job_count = node_ptr->run_job_cnt;
+ 		} else if (IS_NODE_ALLOCATED(node_ptr) &&
+ 			   (reg_msg->job_count == 0)) {	/* job vanished */
+ 			node_ptr->node_state = NODE_STATE_IDLE | node_flags;
+@@ -3929,8 +3950,17 @@ static void _node_did_resp(node_record_t *node_ptr)
+ 	     (node_ptr->boot_req_time != 0)    ||
+ 	     ((slurm_conf.ret2service == 1) &&
+ 	      !xstrcmp(node_ptr->reason, "Not responding")))) {
+-		node_ptr->last_busy = now;
+-		node_ptr->node_state = NODE_STATE_IDLE | node_flags;
++		/*
++		 * Jobs that kept their allocation when the node went DOWN
++		 * (see job_retain_alloc_on_node_fail()) still hold it.
++		 */
++		if (node_ptr->run_job_cnt) {
++			node_ptr->node_state = NODE_STATE_ALLOCATED |
++					       node_flags;
++		} else {
++			node_ptr->last_busy = now;
++			node_ptr->node_state = NODE_STATE_IDLE | node_flags;
++		}
+ 		node_ptr->resume_after = 0;
+ 		info("node_did_resp: node %s returned to service",
+ 		     node_ptr->name);
+@@ -4095,8 +4125,9 @@ void set_node_down_ptr(node_record_t *node_ptr, char *reason)
+ 
+ 	set_node_reason(node_ptr, reason, now);
+ 	_make_node_down(node_ptr, now);
+-	(void) kill_running_job_by_node_ptr(node_ptr);
+-	_sync_bitmaps(node_ptr, 0);
++	(void) kill_running_job_by_down_node_ptr(node_ptr);
++	/* Only jobs that kept their allocation remain */
++	_sync_bitmaps(node_ptr, node_ptr->run_job_cnt);
+ }
+ 
+ /*
+@@ -4309,6 +4340,29 @@ extern void make_node_alloc(node_record_t *node_ptr, job_record_t *job_ptr)
+ 	last_node_update = time(NULL);
+ }
+ 
++extern void make_node_retained(node_record_t *node_ptr, job_record_t *job_ptr)
++{
++	xassert(node_ptr);
++	xassert(job_ptr);
++
++	bit_clear(idle_node_bitmap, node_ptr->index);
++	if (job_ptr->details && (job_ptr->details->share_res == 0))
++		bit_clear(share_node_bitmap, node_ptr->index);
++
++	if ((job_ptr->details &&
++	     (job_ptr->details->whole_node & WHOLE_NODE_USER)) ||
++	    (job_ptr->part_ptr &&
++	     (job_ptr->part_ptr->flags & PART_FLAG_EXCLUSIVE_USER)))
++		node_ptr->owner = job_ptr->user_id;
++
++	if (slurm_mcs_get_select(job_ptr) == 1) {
++		xfree(node_ptr->mcs_label);
++		node_ptr->mcs_label = xstrdup(job_ptr->mcs_label);
++	}
++
++	last_node_update = time(NULL);
++}
++
+ /* make_node_avail - flag specified node as available */
+ extern void make_node_avail(node_record_t *node_ptr)
+ {
+@@ -5212,8 +5266,13 @@ static int _delete_node_ptr(node_record_t *node_ptr)
+ 		error("Can't delete non-dynamic node '%s'.", node_ptr->name);
+ 		return ESLURM_INVALID_NODE_STATE;
+ 	}
++	/*
++	 * A DOWN node can still hold jobs that kept their allocation (see
++	 * job_retain_alloc_on_node_fail()), so check the counts too.
++	 */
+ 	if (IS_NODE_ALLOCATED(node_ptr) ||
+-	    IS_NODE_COMPLETING(node_ptr)) {
++	    IS_NODE_COMPLETING(node_ptr) ||
++	    node_ptr->run_job_cnt || node_ptr->sus_job_cnt) {
+ 		error("Node '%s' can't be delete because it's still in use.",
+ 		      node_ptr->name);
+ 		return ESLURM_NODES_BUSY;
+diff --git a/src/slurmctld/read_config.c b/src/slurmctld/read_config.c
+index 284abe9..ec5dfc3 100644
+--- a/src/slurmctld/read_config.c
++++ b/src/slurmctld/read_config.c
+@@ -2302,7 +2302,16 @@ static int _sync_nodes_to_active_job(job_record_t *job_ptr)
+ 		if ((job_ptr->details) && (job_ptr->details->share_res == 0))
+ 			node_ptr->no_share_job_cnt++;
+ 
+-		if (IS_NODE_DOWN(node_ptr)              &&
++		if (IS_NODE_DOWN(node_ptr) &&
++		    job_retain_alloc_on_node_fail(job_ptr)) {
++			/*
++			 * The job kept its allocation when this node went
++			 * DOWN. _build_bitmaps() marked the DOWN node idle.
++			 */
++			info("Retaining %pJ allocation on DOWN node %s (external job with kill_on_node_fail=0)",
++			     job_ptr, node_ptr->name);
++			make_node_retained(node_ptr, job_ptr);
++		} else if (IS_NODE_DOWN(node_ptr)       &&
+ 		    IS_JOB_RUNNING(job_ptr)             &&
+ 		    (job_ptr->kill_on_node_fail == 0)   &&
+ 		    (job_ptr->node_cnt > 1)) {
+diff --git a/src/slurmctld/slurmctld.h b/src/slurmctld/slurmctld.h
+index aa9b881..0e19508 100644
+--- a/src/slurmctld/slurmctld.h
++++ b/src/slurmctld/slurmctld.h
+@@ -1217,6 +1217,25 @@ extern void kill_job_on_node(job_record_t *job_ptr, node_record_t *node_ptr);
+  */
+ extern int kill_running_job_by_node_ptr(node_record_t *node_ptr);
+ 
++/*
++ * kill_running_job_by_down_node_ptr - As kill_running_job_by_node_ptr(), for
++ *	a node that has just been set DOWN and stays in the cluster. A running
++ *	job for which job_retain_alloc_on_node_fail() is true is left running
++ *	with its whole allocation, including its resources on this node.
++ * IN node_ptr - node that was set DOWN; it must already be DOWN
++ * RET number of killed jobs
++ */
++extern int kill_running_job_by_down_node_ptr(node_record_t *node_ptr);
++
++/*
++ * job_retain_alloc_on_node_fail - Return true if a node failure must leave
++ *	this job running with its whole allocation: a running external job
++ *	submitted with --no-kill (kill_on_node_fail=0), other than a hetjob.
++ *	slurmd has no part in running such a job, so its submitter, not
++ *	slurmctld, decides when to release the allocation.
++ */
++extern bool job_retain_alloc_on_node_fail(job_record_t *job_ptr);
++
+ /* list_compare_config - compare two entry from the config list based upon
+  *	weight, see common/list.h for documentation */
+ int list_compare_config (void *config_entry1, void *config_entry2);
+@@ -1272,6 +1291,16 @@ extern int load_all_part_state(uint16_t reconfig_flags);
+  */
+ extern void make_node_alloc(node_record_t *node_ptr, job_record_t *job_ptr);
+ 
++/*
++ * make_node_retained - restore what _make_node_down() reset on a node for a
++ *	job that keeps its allocation there (see job_retain_alloc_on_node_fail()).
++ *	The node's job counters still include the job; only the idle/share
++ *	bitmaps, owner and MCS label are restored, as make_node_alloc() set them.
++ * IN node_ptr - DOWN node in the job's allocation
++ * IN job_ptr  - job keeping its allocation
++ */
++extern void make_node_retained(node_record_t *node_ptr, job_record_t *job_ptr);
++
+ extern void node_mgr_make_node_blocked(job_record_t *job_ptr, bool set);
+ 
+ /* make_node_comp - flag specified node as completing a job
