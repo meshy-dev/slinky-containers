@@ -1,16 +1,24 @@
-Description: Prepend meshy-dev downstream changelog entry.
- New source package version is 25.11.8-1meshy1 (matches
+Description: Prepend meshy-dev downstream changelog entries.
+ New source package version is 25.11.8-1meshy2 (matches
  ${SLURM_VERSION}-1${SLURM_DEB_PATCH_REV} with the SLURM_DEB_PATCH_REV
- Dockerfile ARG defaulting to meshy1). debuild emits .deb filenames
+ Dockerfile ARG defaulting to meshy2). debuild emits .deb filenames
  stamped with this revision so produced artifacts are distinguishable
  from upstream SchedMD .debs. Regenerate this patch on every
  SLURM_VERSION bump: its context is the upstream changelog's first entry.
+ Add a new entry, and bump SLURM_DEB_PATCH_REV, for each source change.
 Author: meshy-dev
 Forwarded: not-needed
-Last-Update: 2026-11-03
+Last-Update: 2026-11-05
 --- a/debian/changelog
 +++ b/debian/changelog
-@@ -1,3 +1,11 @@
+@@ -1,3 +1,18 @@
++slurm-smd (25.11.8-1meshy2) UNRELEASED; urgency=medium
++
++  * slurmctld: retain external --no-kill jobs (kill_on_node_fail=0) and
++    their whole allocation when their node goes DOWN.
++
++ -- meshy-dev <dev@meshy.ai>  Thu, 05 Nov 2026 00:00:00 +0000
++
 +slurm-smd (25.11.8-1meshy1) UNRELEASED; urgency=medium
 +
 +  * Add --with-nvml=/usr/local/cuda and --with-pmix=/opt/amazon/pmix

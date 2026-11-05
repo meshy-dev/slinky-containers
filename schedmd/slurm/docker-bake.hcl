@@ -18,7 +18,7 @@ variable "SUFFIX" {}
 variable "PARENT_IMAGE"           { default = "ubuntu:24.04" }
 variable "CUDA_TOOLKIT_VERSION"   { default = "13-2" }
 variable "SLURM_VERSION_CUDA_EFA" { default = "25.11.8" }
-variable "SLURM_DEB_PATCH_REV"    { default = "meshy1" }
+variable "SLURM_DEB_PATCH_REV"    { default = "meshy2" }
 variable "EFA_INSTALLER_VERSION"  { default = "1.48.0" }
 variable "EFA_INSTALLER_FLAGS"    { default = "-y --skip-kmod --skip-limit-conf --no-verify --mpi=openmpi5" }
 variable "OMPI_DEFAULT"           { default = "openmpi5" }
@@ -650,4 +650,54 @@ target "slurmd_pyxis_dev" {
 
 target "login_pyxis_dev" {
   inherits = ["login_pyxis", "_dev"]
+}
+
+################################################################################
+# slurmctld-meshy / slurmrestd-meshy: control-plane images built from the same
+# patched .debs as the slurmd images (patches/common/, notably the retained
+# external --no-kill allocations, which changes slurmctld and libslurm). The
+# .debs are built on the EFA base; the control plane uses neither fabric, so
+# one image serves both EFA and IB clusters. The stages themselves are FROM
+# base (no CUDA/fabric runtime). Tags follow the cuda targets: floating tags
+# only when FLOATING_TAGS, plus an immutable ${SHA} tag.
+
+target "_meshy-control-plane" {
+  context = "25.11/ubuntu24.04"
+  dockerfile = "Dockerfile"
+  platforms = ["linux/amd64"]
+  args = {
+    PARENT_IMAGE          = PARENT_IMAGE
+    CUDA_TOOLKIT_VERSION  = CUDA_TOOLKIT_VERSION
+    SLURM_VERSION         = SLURM_VERSION_CUDA_EFA
+    SLURM_VERSION_ARCHIVE = slurm_version_archive(SLURM_VERSION_CUDA_EFA)
+    SLURM_DEB_PATCH_REV   = SLURM_DEB_PATCH_REV
+    EFA_INSTALLER_VERSION = EFA_INSTALLER_VERSION
+    EFA_INSTALLER_FLAGS   = EFA_INSTALLER_FLAGS
+    OMPI_DEFAULT          = OMPI_DEFAULT
+    NCCL_CUDA_SUFFIX      = NCCL_CUDA_SUFFIX
+    NVCC_GENCODE          = NVCC_GENCODE
+    DEBIAN_FRONTEND       = DEBIAN_FRONTEND
+    FABRIC                = "efa"
+    FABRIC_BASE           = "base-efa"
+  }
+}
+
+target "slurmctld-meshy" {
+  inherits = ["_slurmctld", "_meshy-control-plane"]
+  target = "slurmctld"
+  tags = compact([
+    FLOATING_TAGS == "true" ? "${REGISTRY}/slurmctld:${SLURM_VERSION_CUDA_EFA}-ubuntu24.04-meshy" : "",
+    FLOATING_TAGS == "true" ? "${REGISTRY}/slurmctld:25.11-ubuntu24.04-meshy" : "",
+    SHA != "" ? "${REGISTRY}/slurmctld:${SHA}" : "",
+  ])
+}
+
+target "slurmrestd-meshy" {
+  inherits = ["_slurmrestd", "_meshy-control-plane"]
+  target = "slurmrestd"
+  tags = compact([
+    FLOATING_TAGS == "true" ? "${REGISTRY}/slurmrestd:${SLURM_VERSION_CUDA_EFA}-ubuntu24.04-meshy" : "",
+    FLOATING_TAGS == "true" ? "${REGISTRY}/slurmrestd:25.11-ubuntu24.04-meshy" : "",
+    SHA != "" ? "${REGISTRY}/slurmrestd:${SHA}" : "",
+  ])
 }
