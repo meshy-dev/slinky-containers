@@ -4,24 +4,23 @@
 
 ################################################################################
 
-ARG SLURM_VERSION=25.11-latest
-ARG SLURM_VERSION_MICRO=1
+ARG SLURM_VERSION=25.11.8
+ARG SLURM_VERSION_ARCHIVE=slurm-25-11-8-1
 ARG SLURM_DIR=slurm
 ARG PARENT_IMAGE=rockylinux/rockylinux:9
 
 ################################################################################
 FROM alpine:latest AS slurm-src
 
-ARG SLURM_VERSION
-ARG SLURM_VERSION_MICRO
+ARG SLURM_VERSION_ARCHIVE
 ARG SLURM_DIR
-ARG SLURM_TAR="slurm-${SLURM_VERSION//./-}-${SLURM_VERSION_MICRO}.tar.gz"
+ARG SLURM_TAR="${SLURM_VERSION_ARCHIVE}.tar.gz"
 
 WORKDIR /workspace/
 
 RUN apk add -q --no-cache tar
 
-ADD https://github.com/SchedMD/slurm/archive/refs/tags/${SLURM_TAR} ${SLURM_TAR}
+ADD https://github.com/SchedMD/slurm/archive/${SLURM_TAR} ${SLURM_TAR}
 
 RUN \
   mkdir -p ${SLURM_DIR} && \
@@ -112,8 +111,6 @@ for user in $(ls /home/); do
 done
 EOR
 
-COPY --from=build /root/rpmbuild/RPMS/**/*.rpm /tmp/
-
 RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked <<EOR
 # Install Dependencies
 set -xeuo pipefail
@@ -129,6 +126,8 @@ dnf -q -y install --setopt='install_weak_deps=False' \
 dnf -q -y install --setopt='install_weak_deps=False' \
   procps-ng iputils ncurses
 EOR
+
+COPY --from=build /root/rpmbuild/RPMS/**/*.rpm /tmp/
 
 ################################################################################
 FROM base AS base-extra
@@ -156,21 +155,28 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked <<EOR
 set -xeuo pipefail
 dnf -q -y install --setopt='install_weak_deps=False' \
   socat \
+  authselect sssd sssd-ad sssd-idp sssd-ipa sssd-krb5 sssd-ldap \
+  krb5-pkinit \
   ./slurm-slurmctld-[0-9]*.rpm \
   ./slurm-[0-9]*.rpm
 rm *.rpm
+# Configure
+mkdir -p /etc/authselect
+authselect create-profile slinky -b sssd
+authselect select custom/slinky --force
 EOR
 
 COPY files/etc/supervisord.conf /etc/
 COPY \
   files/etc/supervisord.d/slurmctld.ini \
   files/etc/supervisord.d/fakesystemd.ini \
+  files/etc/supervisord.d/sssd.ini \
   /etc/supervisord.d/
 COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/slurmctld-entrypoint.sh /usr/local/bin/entrypoint.sh
 
 EXPOSE 6817/tcp
-ENTRYPOINT ["entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 ################################################################################
 FROM base-extra AS slurmd
@@ -187,7 +193,8 @@ set -xeuo pipefail
 dnf -q -y install --setopt='install_weak_deps=False' \
   gawk socat \
   openssh-server \
-  authselect sssd sssd-ad sssd-ldap \
+  authselect sssd sssd-ad sssd-idp sssd-ipa sssd-krb5 sssd-ldap \
+  krb5-pkinit \
   ./slurm-devel-[0-9]*.rpm \
   ./slurm-libpmi-[0-9]*.rpm \
   ./slurm-pam_slurm-[0-9]*.rpm \
@@ -196,11 +203,12 @@ dnf -q -y install --setopt='install_weak_deps=False' \
 rm *.rpm
 # Configure
 mkdir -p /var/spool/slurmd/
-sed -i -E "s/^passwd:[[:space:]]+/&slurm /g" /etc/nsswitch.conf
-sed -i -E "s/^group:[[:space:]]+/&slurm /g" /etc/nsswitch.conf
 mkdir -p /etc/authselect
-authselect select sssd with-mkhomedir --force
+authselect create-profile slinky -b sssd
+sed -i -E '/^(passwd|group):/ { /slurm/! s/(files)/\1 slurm/g }' /etc/authselect/custom/slinky/nsswitch.conf
+authselect select custom/slinky with-mkhomedir --force
 rm -f /etc/ssh/ssh_host_*
+mkdir -p /usr/local/entrypoint.d/
 EOR
 
 COPY files/etc/supervisord.conf /etc/
@@ -214,7 +222,7 @@ COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/slurmd-entrypoint.sh /usr/local/bin/entrypoint.sh
 
 EXPOSE 6818/tcp 22/tcp
-ENTRYPOINT ["entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 ################################################################################
 FROM base AS slurmdbd
@@ -235,7 +243,7 @@ rm *.rpm
 EOR
 
 EXPOSE 6819/tcp
-ENTRYPOINT ["tini", "-g", "--", "slurmdbd", "-D"]
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/sbin/slurmdbd", "-D"]
 
 ################################################################################
 FROM base AS slurmrestd
@@ -256,7 +264,7 @@ rm *.rpm
 EOR
 
 EXPOSE 6820/tcp
-ENTRYPOINT ["tini", "-g", "--", "slurmrestd"]
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/sbin/slurmrestd"]
 CMD ["0.0.0.0:6820"]
 
 ################################################################################
@@ -303,12 +311,12 @@ EOR
 COPY files/etc/supervisord.conf /etc/
 COPY \
   files/etc/supervisord.d/sackd.ini \
-  files/etc/supervisord.d/fakesystemd-slurm.ini \
+  files/etc/supervisord.d/fakesystemd.ini \
   /etc/supervisord.d/
 COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/sackd-entrypoint.sh /usr/local/bin/entrypoint.sh
 
-ENTRYPOINT ["entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 ################################################################################
 FROM sackd AS login
@@ -325,16 +333,19 @@ set -xeuo pipefail
 dnf -q -y install --setopt='install_weak_deps=False' \
   socat \
   openssh-server \
-  authselect sssd sssd-ad sssd-ldap
+  authselect sssd sssd-ad sssd-idp sssd-ipa sssd-krb5 sssd-ldap \
+  krb5-pkinit
 # Configure
 mkdir -p /etc/authselect
-authselect select sssd with-mkhomedir --force
+authselect create-profile slinky -b sssd
+authselect select custom/slinky with-mkhomedir --force
 rm -f /etc/ssh/ssh_host_*
+mkdir -p /usr/local/entrypoint.d/
 EOR
 
 COPY files/etc/supervisord.conf /etc/
 COPY \
-  files/etc/supervisord.d/fakesystemd-slurm.ini \
+  files/etc/supervisord.d/fakesystemd.ini \
   files/etc/supervisord.d/sackd.ini \
   files/etc/supervisord.d/sshd.ini \
   files/etc/supervisord.d/sssd.ini \
@@ -343,4 +354,4 @@ COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/login-entrypoint.sh /usr/local/bin/entrypoint.sh
 
 EXPOSE 22/tcp
-ENTRYPOINT ["entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

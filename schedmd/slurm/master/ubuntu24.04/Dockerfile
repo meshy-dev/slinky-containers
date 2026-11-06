@@ -5,17 +5,16 @@
 ################################################################################
 
 ARG SLURM_VERSION=master
-ARG SLURM_VERSION_MICRO=1
+ARG SLURM_VERSION_ARCHIVE=master
 ARG SLURM_DIR=slurm
 ARG PARENT_IMAGE=nvidia/cuda:12.8.0-devel-ubuntu24.04
 
 ################################################################################
 FROM alpine:latest AS slurm-src
 
-ARG SLURM_VERSION
-ARG SLURM_VERSION_MICRO
+ARG SLURM_VERSION_ARCHIVE
 ARG SLURM_DIR
-ARG SLURM_TAR="${SLURM_VERSION}.tar.gz"
+ARG SLURM_TAR="${SLURM_VERSION_ARCHIVE}.tar.gz"
 
 WORKDIR /workspace/
 
@@ -59,6 +58,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 # Build Slurm
 set -xeuo pipefail
+apt-get -qq update
 mk-build-deps -ir --tool='apt-get -y -o Debug::pkgProblemResolver=yes --no-install-recommends' ${SLURM_DIR}/debian/control >/dev/null
 ( cd ${SLURM_DIR} && debuild -b -uc -us >/dev/null )
 EOR
@@ -95,8 +95,6 @@ for user in $(ls /home/); do
 done
 EOR
 
-COPY --from=build /tmp/*.deb /tmp/*.ddeb /tmp/
-
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOR
 # Install Dependencies
@@ -113,6 +111,8 @@ apt-get -qq -y install --no-install-recommends \
 apt-get -qq -y install --no-install-recommends \
   libnccl2 libnccl-dev
 EOR
+
+COPY --from=build /tmp/*.deb /tmp/*.ddeb /tmp/
 
 ################################################################################
 FROM base AS base-extra
@@ -197,6 +197,8 @@ set -xeuo pipefail
 apt-get -qq update
 apt-get -qq -y install --no-install-recommends --fix-broken \
   socat \
+  authselect sssd sssd-ad sssd-idp sssd-ipa sssd-krb5 sssd-ldap \
+  krb5-pkinit \
   ./slurm-smd-client_[0-9]*.deb \
   ./slurm-smd-client-dbgsym_[0-9]*.ddeb \
   ./slurm-smd-dev_[0-9]*.deb \
@@ -206,18 +208,23 @@ apt-get -qq -y install --no-install-recommends --fix-broken \
   ./slurm-smd_[0-9]*.deb \
   ./slurm-smd-dbgsym_[0-9]*.ddeb
 rm *.deb && rm *.ddeb
+# Configure
+mkdir -p /etc/authselect
+authselect create-profile slinky -b sssd
+authselect select custom/slinky --force
 EOR
 
 COPY files/etc/supervisor/supervisord.conf /etc/supervisor/
 COPY \
   files/etc/supervisor/conf.d/slurmctld.conf \
   files/etc/supervisor/conf.d/fakesystemd.conf \
+  files/etc/supervisor/conf.d/sssd.conf \
   /etc/supervisor/conf.d/
 COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/slurmctld-entrypoint.sh /usr/local/bin/entrypoint.sh
 
 EXPOSE 6817/tcp
-ENTRYPOINT ["entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 ################################################################################
 FROM base-extra AS slurmd
@@ -238,7 +245,8 @@ apt-get -qq update
 apt-get -qq -y install --no-install-recommends --fix-broken \
   gawk socat \
   openssh-server \
-  authselect sssd sssd-ad sssd-ldap libpam-sss libnss-sss \
+  authselect sssd sssd-ad sssd-idp sssd-ipa sssd-krb5 sssd-ldap \
+  krb5-pkinit \
   ./slurm-smd-client_[0-9]*.deb \
   ./slurm-smd-client-dbgsym_[0-9]*.ddeb \
   ./slurm-smd-dev_[0-9]*.deb \
@@ -254,11 +262,12 @@ apt-get -qq -y install --no-install-recommends --fix-broken \
 rm *.deb && rm *.ddeb
 # Configure
 mkdir -p /var/spool/slurmd/
-sed -i -E "s/^passwd:[[:space:]]+/&slurm /g" /etc/nsswitch.conf
-sed -i -E "s/^group:[[:space:]]+/&slurm /g" /etc/nsswitch.conf
 mkdir -p /etc/authselect
-authselect select sssd with-mkhomedir --force
+authselect create-profile slinky -b sssd
+sed -i -E '/^(passwd|group):/ { /slurm/! s/(files)/\1 slurm/g }' /etc/authselect/custom/slinky/nsswitch.conf
+authselect select custom/slinky with-mkhomedir --force
 rm -f /etc/ssh/ssh_host_*
+mkdir -p /usr/local/entrypoint.d/
 EOR
 
 COPY --from=gdrcopy-build /usr/local/lib/libgdrapi* /usr/local/lib/
@@ -276,7 +285,7 @@ COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/slurmd-entrypoint.sh /usr/local/bin/entrypoint.sh
 
 EXPOSE 6818/tcp 22/tcp
-ENTRYPOINT ["entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 ################################################################################
 FROM base AS slurmdbd
@@ -304,7 +313,7 @@ rm *.deb && rm *.ddeb
 EOR
 
 EXPOSE 6819/tcp
-ENTRYPOINT ["tini", "-g", "--", "slurmdbd", "-D"]
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/sbin/slurmdbd", "-D"]
 
 ################################################################################
 FROM base AS slurmrestd
@@ -332,7 +341,7 @@ rm *.deb && rm *.ddeb
 EOR
 
 EXPOSE 6820/tcp
-ENTRYPOINT ["tini", "-g", "--", "slurmrestd"]
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/sbin/slurmrestd"]
 CMD ["0.0.0.0:6820"]
 
 ################################################################################
@@ -389,12 +398,12 @@ EOR
 COPY files/etc/supervisor/supervisord.conf /etc/supervisor/
 COPY \
   files/etc/supervisor/conf.d/sackd.conf \
-  files/etc/supervisor/conf.d/fakesystemd-slurm.conf \
+  files/etc/supervisor/conf.d/fakesystemd.conf \
   /etc/supervisor/conf.d/
 COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/sackd-entrypoint.sh /usr/local/bin/entrypoint.sh
 
-ENTRYPOINT ["entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 ################################################################################
 FROM sackd AS login
@@ -415,11 +424,14 @@ apt-get -qq update
 apt-get -qq -y install --no-install-recommends \
   socat \
   openssh-server \
-  authselect sssd sssd-ad sssd-ldap libpam-sss libnss-sss
+  authselect sssd sssd-ad sssd-idp sssd-ipa sssd-krb5 sssd-ldap \
+  krb5-pkinit
 # Configure
 mkdir -p /etc/authselect
-authselect select sssd with-mkhomedir --force
+authselect create-profile slinky -b sssd
+authselect select custom/slinky with-mkhomedir --force
 rm -f /etc/ssh/ssh_host_*
+mkdir -p /usr/local/entrypoint.d/
 EOR
 
 COPY --from=gdrcopy-build /usr/local/lib/libgdrapi* /usr/local/lib/
@@ -428,7 +440,7 @@ RUN ldconfig
 
 COPY files/etc/supervisor/supervisord.conf /etc/supervisor/
 COPY \
-  files/etc/supervisor/conf.d/fakesystemd-slurm.conf \
+  files/etc/supervisor/conf.d/fakesystemd.conf \
   files/etc/supervisor/conf.d/sackd.conf \
   files/etc/supervisor/conf.d/sshd.conf \
   files/etc/supervisor/conf.d/sssd.conf \
@@ -437,4 +449,4 @@ COPY files/usr/local/bin/fakesystemd.sh /usr/local/bin/
 COPY files/usr/local/bin/login-entrypoint.sh /usr/local/bin/entrypoint.sh
 
 EXPOSE 22/tcp
-ENTRYPOINT ["entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
